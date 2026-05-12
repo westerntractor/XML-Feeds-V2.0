@@ -5,7 +5,11 @@
     "cors": "^2.8.5",
     "dotenv": "^10.0.0",
     "express": "^4.17.1",
+    "fast-xml-parser": "^4.0.0",
     "nodemon": "^2.0.12",
     "webflow-api": "^0.5.3"
+  },
+  "scripts": {
+    "start": "node server.js"
   }
 }
