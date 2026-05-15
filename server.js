@@ -4,35 +4,52 @@ const bodyParser = require("body-parser");
 const axios = require("axios");
 const cors = require("cors");
 const app = express();
-const port = process.env.PORT ?? 8001;
 
-app.listen(port, () => {
-  console.log(`Listening on port ${port}`);
-});
+// Use Heroku's dynamic port or default to 8001
+const port = process.env.PORT ?? 8001;
 
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
 
-// Updated Constants
+// Constants pulled from your Heroku Config Vars
 const siteId = "60e761d4be0c836d2973fe26";
-const collectionId = "63090c9ea77ee20faacea709"; // Your verified ID
-const config = {
+const collectionId = process.env.COLLECTION_ID || "63090c9ea77ee20faacea709"; 
+
+const webflowConfig = {
   headers: {
-    Authorization: `Bearer 4182751cd912ec9378c39911fa04d124dfa028819228ee1ee7856a770aa6fe52`,
+    Authorization: `Bearer ${process.env.WEBFLOW_API_TOKEN}`,
     "accept-version": "1.0.0",
     "content-type": "application/json",
   },
 };
 
-// 1. NEW: Fetch current Webflow items to build the "Lookup Map"
+/**
+ * 1. FETCH XML FROM MACHINEFINDER
+ * This is the critical update using POST and your new credentials
+ */
+async function fetchMachineFinderData() {
+  try {
+    const response = await axios.post(process.env.XML_FEED_URL, {
+      key: process.env.MACHINEFINDER_KEY,
+      password: process.env.MACHINEFINDER_PASSWORD
+    });
+    return response.data;
+  } catch (e) {
+    console.error("MachineFinder Fetch Error:", e.response?.data || e.message);
+    throw e;
+  }
+}
+
+/**
+ * 2. GET CURRENT WEBFLOW INVENTORY
+ * Used to see what machines we already have
+ */
 app.get("/collection/inventory", async (req, res) => {
   try {
     const url = `https://api.webflow.com/collections/${collectionId}/items`;
-    const response = await axios.get(url, config);
+    const response = await axios.get(url, webflowConfig);
     
-    // Create a map of { unique_id: webflow_item_id }
     const inventoryMap = {};
     response.data.items.forEach(item => {
       if (item['unique_id']) {
@@ -47,7 +64,9 @@ app.get("/collection/inventory", async (req, res) => {
   }
 });
 
-// 2. UPDATED: Smart Add/Update Route
+/**
+ * 3. SYNC DATA TO WEBFLOW
+ */
 app.post("/collection/item/sync", async (req, res) => {
   const { fields, existingItemId } = req.body;
   let url = `https://api.webflow.com/collections/${collectionId}/items`;
@@ -55,14 +74,12 @@ app.post("/collection/item/sync", async (req, res) => {
 
   try {
     if (existingItemId) {
-      // UPDATE existing item
       console.log(`Updating machine: ${fields.name} (${existingItemId})`);
       url += `/${existingItemId}`;
-      result = await axios.patch(url, { fields }, config);
+      result = await axios.patch(url, { fields }, webflowConfig);
     } else {
-      // CREATE new item
       console.log(`Adding new machine: ${fields.name}`);
-      result = await axios.post(url, { fields }, config);
+      result = await axios.post(url, { fields }, webflowConfig);
     }
     res.send(result.data);
   } catch (e) {
@@ -71,15 +88,21 @@ app.post("/collection/item/sync", async (req, res) => {
   }
 });
 
-// 3. NEW: Auto-Publish Route
+/**
+ * 4. AUTO-PUBLISH
+ */
 app.post("/site/publish", async (req, res) => {
   try {
     const url = `https://api.webflow.com/sites/${siteId}/publish`;
     const data = { domains: ["www.westerntractor.ca"] };
-    const result = await axios.post(url, data, config);
+    const result = await axios.post(url, data, webflowConfig);
     res.send("Site published successfully");
   } catch (e) {
     console.error("Publish Error:", e.response?.data || e.message);
     res.status(500).send("Failed to publish site");
   }
+});
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
