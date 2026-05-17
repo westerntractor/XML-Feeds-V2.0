@@ -3,7 +3,14 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
 const cors = require("cors");
-const { webflowRequest, sleep, SITE_PUBLISH_COOLDOWN_MS } = require("./rateLimit");
+const { webflowRequest, SITE_PUBLISH_COOLDOWN_MS } = require("./rateLimit");
+const {
+  PUBLISH_CHUNK_SIZE,
+  getJob,
+  startPublishJob,
+  publishItemsSync,
+  publicJobView,
+} = require("./publishJobs");
 
 const app = express();
 
@@ -47,6 +54,30 @@ function slugify(name, uniqueId) {
   return `${base || "item"}-${uniqueId}`;
 }
 
+const SYNC_FIELD_KEYS = [
+  "name",
+  "unique-id",
+  "advertised-price-amount",
+  "manufacturer-text",
+  "model-text",
+];
+
+function normalizeSyncFields(fields) {
+  return {
+    name: String(fields?.name || "").trim(),
+    "unique-id": Number(fields?.["unique-id"]),
+    "advertised-price-amount": Number(fields?.["advertised-price-amount"]) || 0,
+    "manufacturer-text": String(fields?.["manufacturer-text"] ?? "N/A"),
+    "model-text": String(fields?.["model-text"] ?? "N/A"),
+  };
+}
+
+function syncFieldsEqual(existingFieldData, incomingFields) {
+  const a = normalizeSyncFields(existingFieldData);
+  const b = normalizeSyncFields(incomingFields);
+  return SYNC_FIELD_KEYS.every((key) => a[key] === b[key]);
+}
+
 function buildItemBody(fields) {
   const uniqueId = fields["unique-id"];
   return {
@@ -79,86 +110,195 @@ async function getAllCollectionItems() {
   return items;
 }
 
+function buildInventoryData(items) {
+  const map = {};
+  const fieldsByUniqueId = {};
+  const duplicateItemIds = [];
+
+  for (const item of items) {
+    const uniqueId = item.fieldData?.["unique-id"];
+    if (uniqueId == null) continue;
+
+    const key = String(uniqueId);
+    if (map[key]) {
+      duplicateItemIds.push(item.id);
+    } else {
+      map[key] = item.id;
+      fieldsByUniqueId[key] = item.fieldData;
+    }
+  }
+
+  return { map, fieldsByUniqueId, duplicateItemIds };
+}
+
+async function archiveItemById(itemId, label) {
+  const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`;
+  await webflowRequest(
+    () =>
+      axios.patch(
+        url,
+        { isArchived: true, isDraft: false },
+        webflowConfig
+      ),
+    { label }
+  );
+}
+
 app.get("/collection/inventory", async (req, res) => {
   try {
     const items = await getAllCollectionItems();
-    const inventoryMap = {};
-
-    for (const item of items) {
-      const uniqueId = item.fieldData?.["unique-id"];
-      if (uniqueId != null) {
-        inventoryMap[String(uniqueId)] = item.id;
-      }
-    }
-
-    res.json(inventoryMap);
+    const { map, fieldsByUniqueId } = buildInventoryData(items);
+    res.json({ map, fieldsByUniqueId });
   } catch (e) {
     forwardWebflowError(res, e, "Webflow Inventory Fetch Error:");
   }
 });
 
+/**
+ * POST archive CMS items no longer in the MachineFinder feed.
+ * Body: { incomingUniqueIds: string[] | number[] }
+ */
+app.post("/collection/archive-removed", async (req, res) => {
+  const { incomingUniqueIds } = req.body;
+  if (!Array.isArray(incomingUniqueIds)) {
+    return res.status(400).json({ error: "incomingUniqueIds array is required" });
+  }
+
+  try {
+    const incoming = new Set(incomingUniqueIds.map((id) => String(id)));
+    const items = await getAllCollectionItems();
+    const { duplicateItemIds } = buildInventoryData(items);
+    const archivedItemIds = [];
+    const errors = [];
+
+    for (const itemId of duplicateItemIds) {
+      try {
+        await archiveItemById(itemId, `archive-duplicate:${itemId}`);
+        archivedItemIds.push(itemId);
+        console.log(`Archived duplicate item: ${itemId}`);
+      } catch (e) {
+        errors.push({ itemId, error: e.response?.data || e.message });
+      }
+    }
+
+    for (const item of items) {
+      if (item.isArchived) continue;
+
+      const uniqueId = item.fieldData?.["unique-id"];
+      if (uniqueId == null) continue;
+
+      if (!incoming.has(String(uniqueId))) {
+        try {
+          await archiveItemById(item.id, `archive-removed:${uniqueId}`);
+          archivedItemIds.push(item.id);
+          console.log(
+            `Archived removed machine unique-id ${uniqueId} (${item.id})`
+          );
+        } catch (e) {
+          errors.push({
+            itemId: item.id,
+            uniqueId: String(uniqueId),
+            error: e.response?.data || e.message,
+          });
+        }
+      }
+    }
+
+    console.log(`Archived ${archivedItemIds.length} items`);
+    res.json({ archivedItemIds, errors });
+  } catch (e) {
+    forwardWebflowError(res, e, "Archive Removed Error:");
+  }
+});
+
 app.post("/collection/item/sync", async (req, res) => {
-  const { fields, existingItemId } = req.body;
+  const { fields, existingItemId, existingFields } = req.body;
   if (!fields?.name) {
     return res.status(400).send("fields.name is required");
   }
 
-  const body = buildItemBody(fields);
-  let url = `https://api.webflow.com/v2/collections/${collectionId}/items`;
-
   try {
-    let result;
     if (existingItemId) {
+      const prior = existingFields || {};
+      if (syncFieldsEqual(prior, fields)) {
+        console.log(`Unchanged: ${fields.name} (${existingItemId})`);
+        return res.json({
+          id: existingItemId,
+          action: "unchanged",
+          publish: false,
+        });
+      }
+
+      const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${existingItemId}`;
+      const body = buildItemBody(fields);
       console.log(`Updating machine: ${fields.name} (${existingItemId})`);
-      url += `/${existingItemId}`;
-      result = await webflowRequest(
+      const result = await webflowRequest(
         () => axios.patch(url, body, webflowConfig),
         { label: `sync-update:${fields["unique-id"]}` }
       );
-    } else {
-      console.log(`Adding new machine: ${fields.name}`);
-      result = await webflowRequest(
-        () => axios.post(url, body, webflowConfig),
-        { label: `sync-create:${fields["unique-id"]}` }
-      );
+      return res.json({
+        ...result.data,
+        action: "update",
+        publish: true,
+      });
     }
-    res.json(result.data);
+
+    const url = `https://api.webflow.com/v2/collections/${collectionId}/items`;
+    const body = buildItemBody(fields);
+    console.log(`Adding new machine: ${fields.name}`);
+    const result = await webflowRequest(
+      () => axios.post(url, body, webflowConfig),
+      { label: `sync-create:${fields["unique-id"]}` }
+    );
+    return res.json({
+      ...result.data,
+      action: "create",
+      publish: true,
+    });
   } catch (e) {
     forwardWebflowError(res, e, "Sync Error:");
   }
 });
 
 app.post("/collection/items/publish", async (req, res) => {
-  const { itemIds } = req.body;
+  const { itemIds, async: runAsync } = req.body;
   if (!Array.isArray(itemIds) || itemIds.length === 0) {
     return res.status(400).json({ error: "itemIds array is required" });
   }
 
-  try {
-    const url = `https://api.webflow.com/v2/collections/${collectionId}/items/publish`;
-    const published = [];
-    const errors = [];
-    const chunkSize = 100;
+  const useAsync = runAsync === true || runAsync === "true";
 
-    for (let i = 0; i < itemIds.length; i += chunkSize) {
-      const chunk = itemIds.slice(i, i + chunkSize);
-      const result = await webflowRequest(
-        () => axios.post(url, { itemIds: chunk }, webflowConfig),
-        { label: `cms-publish-chunk-${i / chunkSize + 1}` }
-      );
-      if (result.data?.publishedItemIds) {
-        published.push(...result.data.publishedItemIds);
-      }
-      if (result.data?.errors?.length) {
-        errors.push(...result.data.errors);
-      }
+  try {
+    if (useAsync) {
+      const job = startPublishJob(itemIds, collectionId, webflowConfig);
+      return res.status(202).json({
+        jobId: job.id,
+        status: job.status,
+        total: job.total,
+        message: "CMS publish job started",
+      });
     }
 
-    console.log(`Published ${published.length} CMS items`);
-    res.json({ publishedItemIds: published, errors });
+    if (itemIds.length > PUBLISH_CHUNK_SIZE) {
+      return res.status(400).json({
+        error: `More than ${PUBLISH_CHUNK_SIZE} items requires async: true. Use POST with async or publish-jobs endpoint.`,
+      });
+    }
+
+    const result = await publishItemsSync(itemIds, collectionId, webflowConfig);
+    console.log(`Published ${result.publishedItemIds.length} CMS items (sync)`);
+    res.json(result);
   } catch (e) {
     forwardWebflowError(res, e, "CMS Publish Error:");
   }
+});
+
+app.get("/publish-jobs/:jobId", (req, res) => {
+  const job = getJob(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job not found" });
+  }
+  res.json(publicJobView(job));
 });
 
 app.post("/site/publish", async (req, res) => {

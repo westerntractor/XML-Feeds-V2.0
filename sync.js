@@ -12,6 +12,12 @@ const HEROKU_URL =
   process.env.HEROKU_APP_URL ||
   "https://appwtwebsite-363a14feb8d4.herokuapp.com";
 
+const PUBLISH_CHUNK_SIZE = parseInt(process.env.PUBLISH_CHUNK_SIZE || "50", 10);
+const JOB_POLL_INTERVAL_MS = parseInt(
+  process.env.PUBLISH_JOB_POLL_MS || "3000",
+  10
+);
+
 const webflowConfig = {
   headers: {
     Authorization: `Bearer ${process.env.WEBFLOW_API_TOKEN}`,
@@ -19,6 +25,37 @@ const webflowConfig = {
     "content-type": "application/json",
   },
 };
+
+const SYNC_FIELD_KEYS = [
+  "name",
+  "unique-id",
+  "advertised-price-amount",
+  "manufacturer-text",
+  "model-text",
+];
+
+function normalizeSyncFields(fields) {
+  return {
+    name: String(fields?.name || "").trim(),
+    "unique-id": Number(fields?.["unique-id"]),
+    "advertised-price-amount": Number(fields?.["advertised-price-amount"]) || 0,
+    "manufacturer-text": String(fields?.["manufacturer-text"] ?? "N/A"),
+    "model-text": String(fields?.["model-text"] ?? "N/A"),
+  };
+}
+
+function syncFieldsEqual(existingFieldData, incomingFields) {
+  const a = normalizeSyncFields(existingFieldData);
+  const b = normalizeSyncFields(incomingFields);
+  return SYNC_FIELD_KEYS.every((key) => a[key] === b[key]);
+}
+
+function parseInventoryResponse(data) {
+  if (data?.map) {
+    return { map: data.map, fieldsByUniqueId: data.fieldsByUniqueId || {} };
+  }
+  return { map: data, fieldsByUniqueId: {} };
+}
 
 function parseMachines(xmlData) {
   const parser = new XMLParser({
@@ -58,7 +95,6 @@ function buildFields(machine) {
   };
 }
 
-/** Heroku routes proxy to Webflow — use same throttle/retry as server */
 function herokuRequest(fn, label) {
   return webflowRequest(fn, { label });
 }
@@ -71,15 +107,29 @@ async function syncOneMachine(payload, machineId, labelSuffix = "") {
   return res.data;
 }
 
-async function syncMachineWithRetry(machine, inventory, syncedItemIds, failed, isRetry = false) {
+async function syncMachineWithRetry(
+  machine,
+  inventory,
+  fieldsByUniqueId,
+  changedItemIds,
+  stats,
+  failed,
+  isRetry = false
+) {
   const machineId = machine.id?.toString();
   if (!machineId) return;
 
-  const payload = {
-    fields: buildFields(machine),
-    existingItemId:
-      inventory[machineId] || inventory[parseInt(machineId, 10)],
-  };
+  const fields = buildFields(machine);
+  const existingItemId =
+    inventory[machineId] || inventory[parseInt(machineId, 10)];
+  const existingFields = fieldsByUniqueId[machineId];
+
+  if (existingItemId && existingFields && syncFieldsEqual(existingFields, fields)) {
+    stats.unchanged++;
+    return;
+  }
+
+  const payload = { fields, existingItemId, existingFields };
 
   try {
     const data = await syncOneMachine(
@@ -87,12 +137,27 @@ async function syncMachineWithRetry(machine, inventory, syncedItemIds, failed, i
       machineId,
       isRetry ? "-retry" : ""
     );
-    if (data?.id) syncedItemIds.push(data.id);
-    console.log(`${isRetry ? "Synced (retry)" : "Synced"}: ${payload.fields.name}`);
+
+    if (data.action === "unchanged") {
+      stats.unchanged++;
+      return;
+    }
+
+    if (data.publish && data.id) {
+      changedItemIds.push(data.id);
+    }
+
+    if (data.action === "create") stats.created++;
+    else if (data.action === "update") stats.updated++;
+
+    console.log(
+      `${isRetry ? "Synced (retry)" : "Synced"} [${data.action}]: ${fields.name}`
+    );
   } catch (syncErr) {
     if (!isRetry) {
       failed.push({ machine, machineId });
     }
+    stats.failed++;
     console.error(
       `Failed to sync machine ${machineId}:`,
       syncErr.response?.data || syncErr.message
@@ -100,24 +165,78 @@ async function syncMachineWithRetry(machine, inventory, syncedItemIds, failed, i
   }
 }
 
+async function archiveRemovedMachines(incomingUniqueIds) {
+  console.log(
+    `Archiving CMS items not in feed (${incomingUniqueIds.length} active ids)...`
+  );
+  const res = await herokuRequest(
+    () =>
+      axios.post(`${HEROKU_URL}/collection/archive-removed`, {
+        incomingUniqueIds,
+      }),
+    "archive-removed"
+  );
+  const count = res.data.archivedItemIds?.length || 0;
+  console.log(`Archived ${count} removed/duplicate items`);
+  if (res.data.errors?.length) {
+    console.warn("Archive errors:", res.data.errors);
+  }
+  return res.data.archivedItemIds || [];
+}
+
+async function pollPublishJob(jobId) {
+  while (true) {
+    const res = await axios.get(`${HEROKU_URL}/publish-jobs/${jobId}`);
+    const job = res.data;
+
+    if (job.status === "done") {
+      console.log(
+        `CMS publish job complete: ${job.publishedItemIds?.length || 0} published`
+      );
+      if (job.errors?.length) {
+        console.warn("CMS publish errors:", job.errors);
+      }
+      return job;
+    }
+
+    if (job.status === "failed") {
+      throw new Error(job.error || "CMS publish job failed");
+    }
+
+    console.log(
+      `CMS publish job ${job.status}: ${job.processed || 0}/${job.total || "?"}...`
+    );
+    await sleep(JOB_POLL_INTERVAL_MS);
+  }
+}
+
 async function publishCmsItems(itemIds) {
-  if (!itemIds.length) {
+  const unique = [...new Set(itemIds)];
+  if (!unique.length) {
     console.log("No CMS items to publish");
     return;
   }
 
-  console.log(`Publishing ${itemIds.length} CMS items...`);
-  const res = await herokuRequest(
-    () =>
-      axios.post(`${HEROKU_URL}/collection/items/publish`, { itemIds }),
-    "cms-items-publish"
-  );
   console.log(
-    `CMS publish result: ${res.data.publishedItemIds?.length || 0} published`
+    `Starting async CMS publish for ${unique.length} changed items (chunks of ${PUBLISH_CHUNK_SIZE})...`
   );
-  if (res.data.errors?.length) {
-    console.warn("CMS publish errors:", res.data.errors);
+
+  const startRes = await herokuRequest(
+    () =>
+      axios.post(`${HEROKU_URL}/collection/items/publish`, {
+        itemIds: unique,
+        async: true,
+      }),
+    "cms-publish-start"
+  );
+
+  const jobId = startRes.data.jobId;
+  if (!jobId) {
+    throw new Error("Server did not return a publish jobId");
   }
+
+  console.log(`CMS publish job started: ${jobId}`);
+  await pollPublishJob(jobId);
 }
 
 async function publishSite() {
@@ -136,13 +255,17 @@ async function publishSite() {
 
 async function runSync() {
   console.log("Starting sync process...");
-  console.log(`Throttle interval: ${MIN_INTERVAL_MS}ms (~${process.env.WEBFLOW_RATE_LIMIT_PER_MINUTE || 120}/min)`);
+  console.log(
+    `Throttle: ${MIN_INTERVAL_MS}ms (~${process.env.WEBFLOW_RATE_LIMIT_PER_MINUTE || 120}/min), publish chunks: ${PUBLISH_CHUNK_SIZE}`
+  );
 
   const invRes = await herokuRequest(
     () => axios.get(`${HEROKU_URL}/collection/inventory`),
     "inventory"
   );
-  const inventory = invRes.data;
+  const { map: inventory, fieldsByUniqueId } = parseInventoryResponse(
+    invRes.data
+  );
 
   console.log("Fetching XML from MachineFinder...");
   const xmlRes = await axios.post(process.env.XML_FEED_URL, {
@@ -153,11 +276,23 @@ async function runSync() {
   const machines = parseMachines(xmlRes.data);
   console.log(`Found ${machines.length} machines. Starting sync...`);
 
-  const syncedItemIds = [];
+  const incomingUniqueIds = machines
+    .map((m) => m.id?.toString())
+    .filter(Boolean);
+
+  const changedItemIds = [];
   const failed = [];
+  const stats = { created: 0, updated: 0, unchanged: 0, failed: 0 };
 
   for (const machine of machines) {
-    await syncMachineWithRetry(machine, inventory, syncedItemIds, failed);
+    await syncMachineWithRetry(
+      machine,
+      inventory,
+      fieldsByUniqueId,
+      changedItemIds,
+      stats,
+      failed
+    );
   }
 
   if (failed.length) {
@@ -166,7 +301,9 @@ async function runSync() {
       await syncMachineWithRetry(
         machine,
         inventory,
-        syncedItemIds,
+        fieldsByUniqueId,
+        changedItemIds,
+        stats,
         [],
         true
       );
@@ -174,9 +311,16 @@ async function runSync() {
   }
 
   console.log(
-    `Sync loop finished. ${syncedItemIds.length} items synced successfully.`
+    `Sync loop finished — created: ${stats.created}, updated: ${stats.updated}, unchanged: ${stats.unchanged}, failed: ${stats.failed}`
   );
-  await publishCmsItems(syncedItemIds);
+
+  const archivedItemIds = await archiveRemovedMachines(incomingUniqueIds);
+  const itemIdsToPublish = [
+    ...new Set([...changedItemIds, ...archivedItemIds]),
+  ];
+
+  console.log(`${itemIdsToPublish.length} items queued for CMS publish`);
+  await publishCmsItems(itemIdsToPublish);
   await publishSite();
   console.log("Sync complete.");
 }
