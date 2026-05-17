@@ -95,7 +95,13 @@ app.post("/site/publish", async (req, res) => {
   try {
     const url = `https://api.webflow.com/v2/sites/${siteId}/publish`;
     // v2 requires an array of specific target IDs
-    const data = { publishTargetIds: [siteId] }; 
+    const data = {
+      "customDomains": [
+        "621d322c2758f70acb582292",
+        "621d322c2758f768ca582291"
+      ],
+      "publishToWebflowSubdomain": false
+    }; 
     await axios.post(url, data, webflowConfig);
     res.send("Site published successfully");
   } catch (e) {

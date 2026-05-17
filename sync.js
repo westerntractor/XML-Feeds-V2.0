@@ -2,8 +2,15 @@ require("dotenv/config");
 const axios = require("axios");
 const { XMLParser } = require("fast-xml-parser");
 
-// Ensure this matches your HEROKU_APP_URL exactly
 const HEROKU_URL = process.env.HEROKU_APP_URL || "https://appwtwebsite-363a14feb8d4.herokuapp.com";
+
+const webflowConfig = {
+  headers: {
+    Authorization: `Bearer ${process.env.WEBFLOW_API_TOKEN}`,
+    "accept-version": "2.0.0",
+    "content-type": "application/json",
+  },
+};
 
 async function runSync() {
   try {
@@ -55,8 +62,8 @@ async function runSync() {
           name: `${machine.manufacturer || ''} ${machine.model || ''}`.trim(),
           "unique-id": parseInt(machineId),
           "advertised-price-amount": parseFloat(machine.price?.amount || 0),
-          "manufacturer-text": machine.manufacturer || "N/A",
-          "model-text": machine.model || "N/A",
+          "manufacturer-text": String(machine.manufacturer ?? "N/A"),
+          "model-text": String(machine.model) || "N/A",
         }
       };
 
@@ -81,5 +88,36 @@ async function runSync() {
     console.error("Sync failed:", e.response?.data || e.message);
   }
 }
+
+async function doPublish() {
+  try {
+    console.log("Starting publish process...");
+    await axios.post(`${HEROKU_URL}/site/publish`);
+    console.log("Publish Complete!");
+  } catch (e) {
+    console.error("Publish failed:", e.response?.data || e.message);
+  }
+}
+
+async function fetchSite() {
+  const siteId = process.env.SITE_ID;
+  if (!siteId) throw new Error("Missing SITE_ID in environment");
+  const response = await axios.get(
+    `https://api.webflow.com/v2/sites/${siteId}`,
+    webflowConfig
+  );
+  return response.data;
+}
+
+async function fetchCustomDomains() {
+  const siteId = process.env.SITE_ID;
+  if (!siteId) throw new Error("Missing SITE_ID in environment");
+  const response = await axios.get(
+    `https://api.webflow.com/v2/sites/${siteId}/custom_domains`,
+    webflowConfig
+  );
+  return response.data;
+}
+
 
 runSync();
