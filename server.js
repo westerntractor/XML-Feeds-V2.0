@@ -3,6 +3,8 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const axios = require("axios");
 const cors = require("cors");
+const { webflowRequest, sleep, SITE_PUBLISH_COOLDOWN_MS } = require("./rateLimit");
+
 const app = express();
 
 const port = process.env.PORT ?? 8001;
@@ -17,7 +19,10 @@ const collectionId = process.env.COLLECTION_ID || "63090c9ea77ee20faacea709";
 const customDomainIds = (
   process.env.CUSTOM_DOMAIN_IDS ||
   "621d322c2758f70acb582292,621d322c2758f768ca582291"
-).split(",").map((id) => id.trim()).filter(Boolean);
+)
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
 
 const webflowConfig = {
   headers: {
@@ -26,6 +31,13 @@ const webflowConfig = {
     "content-type": "application/json",
   },
 };
+
+function forwardWebflowError(res, e, fallbackMessage) {
+  const status = e.response?.status || 500;
+  const body = e.response?.data || fallbackMessage;
+  console.error(fallbackMessage, body);
+  res.status(status).send(body);
+}
 
 function slugify(name, uniqueId) {
   const base = String(name || "item")
@@ -54,7 +66,10 @@ async function getAllCollectionItems() {
 
   while (true) {
     const url = `https://api.webflow.com/v2/collections/${collectionId}/items?offset=${offset}&limit=${limit}`;
-    const response = await axios.get(url, webflowConfig);
+    const response = await webflowRequest(
+      () => axios.get(url, webflowConfig),
+      { label: "inventory-page" }
+    );
     const batch = response.data.items || [];
     items.push(...batch);
     if (batch.length < limit) break;
@@ -64,9 +79,6 @@ async function getAllCollectionItems() {
   return items;
 }
 
-/**
- * GET current Webflow inventory map: unique-id -> webflow item id
- */
 app.get("/collection/inventory", async (req, res) => {
   try {
     const items = await getAllCollectionItems();
@@ -81,14 +93,10 @@ app.get("/collection/inventory", async (req, res) => {
 
     res.json(inventoryMap);
   } catch (e) {
-    console.error("Webflow Inventory Fetch Error:", e.response?.data || e.message);
-    res.status(500).send("Failed to fetch inventory");
+    forwardWebflowError(res, e, "Webflow Inventory Fetch Error:");
   }
 });
 
-/**
- * POST create or update a single CMS item (staged, ready to publish)
- */
 app.post("/collection/item/sync", async (req, res) => {
   const { fields, existingItemId } = req.body;
   if (!fields?.name) {
@@ -103,21 +111,23 @@ app.post("/collection/item/sync", async (req, res) => {
     if (existingItemId) {
       console.log(`Updating machine: ${fields.name} (${existingItemId})`);
       url += `/${existingItemId}`;
-      result = await axios.patch(url, body, webflowConfig);
+      result = await webflowRequest(
+        () => axios.patch(url, body, webflowConfig),
+        { label: `sync-update:${fields["unique-id"]}` }
+      );
     } else {
       console.log(`Adding new machine: ${fields.name}`);
-      result = await axios.post(url, body, webflowConfig);
+      result = await webflowRequest(
+        () => axios.post(url, body, webflowConfig),
+        { label: `sync-create:${fields["unique-id"]}` }
+      );
     }
     res.json(result.data);
   } catch (e) {
-    console.log("Sync Error:", e.response?.data || e.message);
-    res.status(500).send(e.response?.data || "Error during sync");
+    forwardWebflowError(res, e, "Sync Error:");
   }
 });
 
-/**
- * POST publish CMS items by Webflow item id
- */
 app.post("/collection/items/publish", async (req, res) => {
   const { itemIds } = req.body;
   if (!Array.isArray(itemIds) || itemIds.length === 0) {
@@ -132,7 +142,10 @@ app.post("/collection/items/publish", async (req, res) => {
 
     for (let i = 0; i < itemIds.length; i += chunkSize) {
       const chunk = itemIds.slice(i, i + chunkSize);
-      const result = await axios.post(url, { itemIds: chunk }, webflowConfig);
+      const result = await webflowRequest(
+        () => axios.post(url, { itemIds: chunk }, webflowConfig),
+        { label: `cms-publish-chunk-${i / chunkSize + 1}` }
+      );
       if (result.data?.publishedItemIds) {
         published.push(...result.data.publishedItemIds);
       }
@@ -144,14 +157,10 @@ app.post("/collection/items/publish", async (req, res) => {
     console.log(`Published ${published.length} CMS items`);
     res.json({ publishedItemIds: published, errors });
   } catch (e) {
-    console.error("CMS Publish Error:", e.response?.data || e.message);
-    res.status(500).send(e.response?.data || "Failed to publish CMS items");
+    forwardWebflowError(res, e, "CMS Publish Error:");
   }
 });
 
-/**
- * POST publish site to custom domains
- */
 app.post("/site/publish", async (req, res) => {
   try {
     const url = `https://api.webflow.com/v2/sites/${siteId}/publish`;
@@ -159,12 +168,19 @@ app.post("/site/publish", async (req, res) => {
       customDomains: customDomainIds,
       publishToWebflowSubdomain: false,
     };
-    const result = await axios.post(url, data, webflowConfig);
+    const result = await webflowRequest(
+      () => axios.post(url, data, webflowConfig),
+      {
+        label: "site-publish",
+        maxRetries: 8,
+        baseMs: SITE_PUBLISH_COOLDOWN_MS,
+        maxMs: SITE_PUBLISH_COOLDOWN_MS * 2,
+      }
+    );
     console.log("Site publish queued:", result.status, result.data);
     res.json({ message: "Site published successfully", data: result.data });
   } catch (e) {
-    console.error("Publish Error:", e.response?.data || e.message);
-    res.status(500).send(e.response?.data || "Failed to publish site");
+    forwardWebflowError(res, e, "Publish Error:");
   }
 });
 
