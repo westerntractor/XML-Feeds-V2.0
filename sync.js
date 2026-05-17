@@ -12,91 +12,110 @@ const webflowConfig = {
   },
 };
 
-async function runSync() {
-  try {
-    console.log("Starting sync process...");
+function parseMachines(xmlData) {
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: "",
+  });
+  const jsonObj = parser.parse(xmlData);
 
-    // 1. Get current inventory from your working Heroku route
-    const invRes = await axios.get(`${HEROKU_URL}/collection/inventory`);
-    const inventory = invRes.data;
+  let machines;
+  if (jsonObj.machine_feed?.machines?.machine) {
+    machines = jsonObj.machine_feed.machines.machine;
+  } else if (jsonObj.machine_feed?.machine) {
+    machines = jsonObj.machine_feed.machine;
+  } else if (jsonObj.machines?.machine) {
+    machines = jsonObj.machines.machine;
+  }
 
-    // 2. Fetch MachineFinder XML
-    console.log("Fetching XML from MachineFinder...");
-    const xmlRes = await axios.post(process.env.XML_FEED_URL, {
-      key: process.env.MACHINEFINDER_KEY,
-      password: process.env.MACHINEFINDER_PASSWORD
-    });
+  if (!machines) {
+    throw new Error("Could not find the 'machine' list in the XML data. Check MachineFinder feed.");
+  }
 
-    const parser = new XMLParser({
-        ignoreAttributes: false,
-        attributeNamePrefix: ""
-    });
-    const jsonObj = parser.parse(xmlRes.data);
-    
-    // SAFETY CHECK: Locate the machines array regardless of XML nesting
-    let machines;
-    if (jsonObj.machine_feed && jsonObj.machine_feed.machines) {
-        machines = jsonObj.machine_feed.machines.machine;
-    } else if (jsonObj.machine_feed && jsonObj.machine_feed.machine) {
-        machines = jsonObj.machine_feed.machine;
-    } else if (jsonObj.machines && jsonObj.machines.machine) {
-        machines = jsonObj.machines.machine;
-    }
+  return Array.isArray(machines) ? machines : [machines];
+}
 
-    if (!machines) {
-        throw new Error("Could not find the 'machine' list in the XML data. Check MachineFinder feed.");
-    }
+function buildFields(machine) {
+  const machineId = machine.id?.toString();
+  const name = `${machine.manufacturer || ""} ${machine.model || ""}`.trim();
 
-    // Force into an array if there is only one machine
-    if (!Array.isArray(machines)) machines = [machines];
+  return {
+    name,
+    "unique-id": parseInt(machineId, 10),
+    "advertised-price-amount": parseFloat(machine.price?.amount || 0),
+    "manufacturer-text": String(machine.manufacturer ?? "N/A"),
+    "model-text": String(machine.model ?? "N/A"),
+  };
+}
 
-    console.log(`Found ${machines.length} machines. Starting sync...`);
+async function publishCmsItems(itemIds) {
+  if (!itemIds.length) {
+    console.log("No CMS items to publish");
+    return;
+  }
 
-    // 3. Loop through machines and sync
-    for (const machine of machines) {
-      const machineId = machine.id?.toString();
-      if (!machineId) continue;
-
-      const payload = {
-        fields: {
-          name: `${machine.manufacturer || ''} ${machine.model || ''}`.trim(),
-          "unique-id": parseInt(machineId),
-          "advertised-price-amount": parseFloat(machine.price?.amount || 0),
-          "manufacturer-text": String(machine.manufacturer ?? "N/A"),
-          "model-text": String(machine.model) || "N/A",
-        }
-      };
-
-      if (inventory[machineId]) {
-        payload.existingItemId = inventory[machineId];
-      }
-
-      try {
-        await axios.post(`${HEROKU_URL}/collection/item/sync`, payload);
-        console.log(`Synced: ${payload.fields.name}`);
-      } catch (syncErr) {
-        console.error(`Failed to sync machine ${machineId}:`, syncErr.response?.data || syncErr.message);
-      }
-    }
-
-    // 4. Final Publish
-    console.log("Sync loop finished. Requesting site publish...");
-    await axios.post(`${HEROKU_URL}/site/publish`);
-    console.log("Sync Complete and Site Published!");
-
-  } catch (e) {
-    console.error("Sync failed:", e.response?.data || e.message);
+  console.log(`Publishing ${itemIds.length} CMS items...`);
+  const res = await axios.post(`${HEROKU_URL}/collection/items/publish`, { itemIds });
+  console.log(`CMS publish result: ${res.data.publishedItemIds?.length || 0} published`);
+  if (res.data.errors?.length) {
+    console.warn("CMS publish errors:", res.data.errors);
   }
 }
 
-async function doPublish() {
-  try {
-    console.log("Starting publish process...");
-    await axios.post(`${HEROKU_URL}/site/publish`);
-    console.log("Publish Complete!");
-  } catch (e) {
-    console.error("Publish failed:", e.response?.data || e.message);
+async function publishSite() {
+  console.log("Requesting site publish...");
+  const res = await axios.post(`${HEROKU_URL}/site/publish`);
+  console.log("Site publish:", res.data?.message || res.data);
+}
+
+async function runSync() {
+  console.log("Starting sync process...");
+
+  const invRes = await axios.get(`${HEROKU_URL}/collection/inventory`);
+  const inventory = invRes.data;
+
+  console.log("Fetching XML from MachineFinder...");
+  const xmlRes = await axios.post(process.env.XML_FEED_URL, {
+    key: process.env.MACHINEFINDER_KEY,
+    password: process.env.MACHINEFINDER_PASSWORD,
+  });
+
+  const machines = parseMachines(xmlRes.data);
+  console.log(`Found ${machines.length} machines. Starting sync...`);
+
+  const syncedItemIds = [];
+
+  for (const machine of machines) {
+    const machineId = machine.id?.toString();
+    if (!machineId) continue;
+
+    const payload = {
+      fields: buildFields(machine),
+      existingItemId: inventory[machineId] || inventory[parseInt(machineId, 10)],
+    };
+
+    try {
+      const res = await axios.post(`${HEROKU_URL}/collection/item/sync`, payload);
+      if (res.data?.id) syncedItemIds.push(res.data.id);
+      console.log(`Synced: ${payload.fields.name}`);
+    } catch (syncErr) {
+      console.error(
+        `Failed to sync machine ${machineId}:`,
+        syncErr.response?.data || syncErr.message
+      );
+    }
   }
+
+  console.log("Sync loop finished.");
+  await publishCmsItems(syncedItemIds);
+  await publishSite();
+  console.log("Sync complete.");
+}
+
+async function doPublish() {
+  console.log("Publishing CMS + site (republish existing items skipped — run sync for full flow)...");
+  await publishSite();
+  console.log("Site publish complete.");
 }
 
 async function fetchSite() {
@@ -119,5 +138,27 @@ async function fetchCustomDomains() {
   return response.data;
 }
 
+async function main() {
+  const mode = process.argv[2] || "sync";
 
-runSync();
+  if (mode === "site") {
+    const site = await fetchSite();
+    console.log(JSON.stringify(site, null, 2));
+    const domains = await fetchCustomDomains();
+    console.log("\nCustom domains:");
+    console.log(JSON.stringify(domains, null, 2));
+    return;
+  }
+
+  if (mode === "publish") {
+    await doPublish();
+    return;
+  }
+
+  await runSync();
+}
+
+main().catch((e) => {
+  console.error(e.response?.data || e.message);
+  process.exit(1);
+});
