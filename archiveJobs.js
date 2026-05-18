@@ -39,6 +39,7 @@ function publicJobView(job) {
     total: job.total,
     processed: job.processed,
     archivedItemIds: job.archivedItemIds,
+    skippedAlreadyArchived: job.skippedAlreadyArchived ?? 0,
     errors: job.errors,
     error: job.error,
     createdAt: job.createdAt,
@@ -53,8 +54,14 @@ async function runArchiveJob(job, ctx) {
     const incoming = new Set(job._incomingUniqueIds.map((id) => String(id)));
     const items = await ctx.getAllCollectionItems();
     const { duplicateItemIds } = ctx.buildInventoryData(items);
+    const archivedIds = new Set(
+      items.filter((item) => item.isArchived).map((item) => item.id)
+    );
 
-    const toArchive = [...duplicateItemIds];
+    const toArchive = duplicateItemIds.filter((id) => !archivedIds.has(id));
+    job.skippedAlreadyArchived = duplicateItemIds.filter((id) =>
+      archivedIds.has(id)
+    ).length;
 
     for (const item of items) {
       if (item.isArchived) continue;

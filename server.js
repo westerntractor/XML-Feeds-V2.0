@@ -190,10 +190,18 @@ app.post("/collection/archive-removed", async (req, res) => {
     const incoming = new Set(incomingUniqueIds.map((id) => String(id)));
     const items = await getAllCollectionItems();
     const { duplicateItemIds } = buildInventoryData(items);
+    const archivedIds = new Set(
+      items.filter((item) => item.isArchived).map((item) => item.id)
+    );
     const archivedItemIds = [];
     const errors = [];
+    let skippedAlreadyArchived = 0;
 
     for (const itemId of duplicateItemIds) {
+      if (archivedIds.has(itemId)) {
+        skippedAlreadyArchived++;
+        continue;
+      }
       try {
         await archiveItemById(itemId, `archive-duplicate:${itemId}`);
         archivedItemIds.push(itemId);
@@ -220,7 +228,7 @@ app.post("/collection/archive-removed", async (req, res) => {
       }
     }
 
-    res.json({ archivedItemIds, errors });
+    res.json({ archivedItemIds, skippedAlreadyArchived, errors });
   } catch (e) {
     forwardWebflowError(res, e, "Archive Removed Error:");
   }
