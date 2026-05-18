@@ -7,6 +7,11 @@ const {
   MIN_INTERVAL_MS,
   SITE_PUBLISH_COOLDOWN_MS,
 } = require("./rateLimit");
+const {
+  buildMachineFields,
+  syncFieldsEqual,
+  isCloudinaryEnabled,
+} = require("./fieldMap");
 
 const HEROKU_URL =
   process.env.HEROKU_APP_URL ||
@@ -25,30 +30,6 @@ const webflowConfig = {
     "content-type": "application/json",
   },
 };
-
-const SYNC_FIELD_KEYS = [
-  "name",
-  "unique-id",
-  "advertised-price-amount",
-  "manufacturer-text",
-  "model-text",
-];
-
-function normalizeSyncFields(fields) {
-  return {
-    name: String(fields?.name || "").trim(),
-    "unique-id": Number(fields?.["unique-id"]),
-    "advertised-price-amount": Number(fields?.["advertised-price-amount"]) || 0,
-    "manufacturer-text": String(fields?.["manufacturer-text"] ?? "N/A"),
-    "model-text": String(fields?.["model-text"] ?? "N/A"),
-  };
-}
-
-function syncFieldsEqual(existingFieldData, incomingFields) {
-  const a = normalizeSyncFields(existingFieldData);
-  const b = normalizeSyncFields(incomingFields);
-  return SYNC_FIELD_KEYS.every((key) => a[key] === b[key]);
-}
 
 function parseInventoryResponse(data) {
   if (data?.map) {
@@ -82,19 +63,6 @@ function parseMachines(xmlData) {
   return Array.isArray(machines) ? machines : [machines];
 }
 
-function buildFields(machine) {
-  const machineId = machine.id?.toString();
-  const name = `${machine.manufacturer || ""} ${machine.model || ""}`.trim();
-
-  return {
-    name,
-    "unique-id": parseInt(machineId, 10),
-    "advertised-price-amount": parseFloat(machine.price?.amount || 0),
-    "manufacturer-text": String(machine.manufacturer ?? "N/A"),
-    "model-text": String(machine.model ?? "N/A"),
-  };
-}
-
 function herokuRequest(fn, label) {
   return webflowRequest(fn, { label });
 }
@@ -119,7 +87,7 @@ async function syncMachineWithRetry(
   const machineId = machine.id?.toString();
   if (!machineId) return;
 
-  const fields = buildFields(machine);
+  const fields = buildMachineFields(machine);
   const existingItemId =
     inventory[machineId] || inventory[parseInt(machineId, 10)];
   const existingFields = fieldsByUniqueId[machineId];
@@ -269,8 +237,159 @@ async function publishSite() {
   console.log("Site publish:", res.data?.message || res.data);
 }
 
+async function fetchFeedMachines() {
+  console.log("Fetching XML from MachineFinder...");
+  const xmlRes = await axios.post(process.env.XML_FEED_URL, {
+    key: process.env.MACHINEFINDER_KEY,
+    password: process.env.MACHINEFINDER_PASSWORD,
+  });
+  return parseMachines(xmlRes.data);
+}
+
+async function fetchFeedUniqueIds() {
+  const machines = await fetchFeedMachines();
+  return machines.map((m) => m.id?.toString()).filter(Boolean);
+}
+
+async function resolveFeedKeeperIds(incomingUniqueIds) {
+  const res = await herokuRequest(
+    () =>
+      axios.post(`${HEROKU_URL}/collection/feed-keeper-ids`, {
+        incomingUniqueIds,
+      }),
+    "feed-keeper-ids"
+  );
+  return res.data;
+}
+
+async function runPublishAll() {
+  console.log("Publish-all: CMS publish active feed keepers, then site publish...");
+  console.log(
+    `Throttle: ${MIN_INTERVAL_MS}ms (~${process.env.WEBFLOW_RATE_LIMIT_PER_MINUTE || 120}/min), publish chunks: ${PUBLISH_CHUNK_SIZE}`
+  );
+
+  const incomingUniqueIds = await fetchFeedUniqueIds();
+  console.log(`Feed machines: ${incomingUniqueIds.length}`);
+
+  const { keeperItemIds, skippedArchived, missingInCms, keeperCount } =
+    await resolveFeedKeeperIds(incomingUniqueIds);
+
+  console.log(`Active keepers to CMS publish: ${keeperCount ?? keeperItemIds.length}`);
+  if (missingInCms?.length) {
+    console.warn(
+      `${missingInCms.length} feed IDs have no CMS row (run sync first):`,
+      missingInCms.slice(0, 5),
+      missingInCms.length > 5 ? "..." : ""
+    );
+  }
+  if (skippedArchived?.length) {
+    console.warn(
+      `${skippedArchived.length} feed keepers are archived (skipped publish):`,
+      skippedArchived.slice(0, 3)
+    );
+  }
+
+  await publishCmsItems(keeperItemIds || []);
+  await publishSite();
+  console.log("Publish-all complete.");
+}
+
+/** John Deere 9570RX — three distinct feed listings */
+const JD_9570RX_UNIQUE_IDS = ["10979598", "11409593", "11500214"];
+
+function logCloudinaryStatus() {
+  if (isCloudinaryEnabled()) {
+    console.log(
+      `Cloudinary: enabled (gallery w=${process.env.CLOUDINARY_GALLERY_WIDTH || 1600}, thumb w=${process.env.CLOUDINARY_THUMB_WIDTH || 800}, signed fetch)`
+    );
+  } else {
+    console.log("Cloudinary: disabled — using raw feed image URLs");
+  }
+}
+
+async function runSyncUniqueIds(uniqueIds) {
+  console.log(`Sync-ids (${uniqueIds.length}): ${uniqueIds.join(", ")}`);
+  logCloudinaryStatus();
+  console.log(
+    `Throttle: ${MIN_INTERVAL_MS}ms (~${process.env.WEBFLOW_RATE_LIMIT_PER_MINUTE || 120}/min)`
+  );
+
+  const invRes = await herokuRequest(
+    () => axios.get(`${HEROKU_URL}/collection/inventory`),
+    "inventory"
+  );
+  const { map: inventory, fieldsByUniqueId } = parseInventoryResponse(
+    invRes.data
+  );
+
+  const idSet = new Set(uniqueIds.map((id) => String(id)));
+  const machines = (await fetchFeedMachines()).filter((m) =>
+    idSet.has(String(m.id))
+  );
+
+  if (machines.length === 0) {
+    throw new Error("No matching machines found in feed for given ids");
+  }
+  if (machines.length < uniqueIds.length) {
+    const found = new Set(machines.map((m) => String(m.id)));
+    console.warn(
+      "IDs not in feed:",
+      uniqueIds.filter((id) => !found.has(String(id)))
+    );
+  }
+
+  const changedItemIds = [];
+  const failed = [];
+  const stats = { created: 0, updated: 0, unchanged: 0, failed: 0 };
+
+  for (const machine of machines) {
+    const fields = buildMachineFields(machine);
+    const sampleUrl = fields["image-gallery"]?.[0]?.url || "";
+    console.log(
+      `Feed ${machine.id}: price=${fields["advertised-price-amount"]}, images=${fields["image-gallery"]?.length || 0}, via=${sampleUrl.includes("res.cloudinary.com") ? "cloudinary" : "direct"}`
+    );
+    await syncMachineWithRetry(
+      machine,
+      inventory,
+      fieldsByUniqueId,
+      changedItemIds,
+      stats,
+      failed
+    );
+  }
+
+  if (failed.length) {
+    for (const { machine } of failed) {
+      await syncMachineWithRetry(
+        machine,
+        inventory,
+        fieldsByUniqueId,
+        changedItemIds,
+        stats,
+        [],
+        true
+      );
+    }
+  }
+
+  console.log(
+    `Sync-ids finished — created: ${stats.created}, updated: ${stats.updated}, unchanged: ${stats.unchanged}, failed: ${stats.failed}`
+  );
+
+  if (!changedItemIds.length) {
+    console.log("No changes detected — still running CMS publish + site publish");
+    const { keeperItemIds } = await resolveFeedKeeperIds(uniqueIds);
+    changedItemIds.push(...keeperItemIds);
+  }
+
+  await publishCmsItems([...new Set(changedItemIds)]);
+  await publishSite();
+  console.log("Sync-ids complete.");
+}
+
 async function runSync() {
   console.log("Starting sync process...");
+  logCloudinaryStatus();
   console.log(
     `Throttle: ${MIN_INTERVAL_MS}ms (~${process.env.WEBFLOW_RATE_LIMIT_PER_MINUTE || 120}/min), publish chunks: ${PUBLISH_CHUNK_SIZE}`
   );
@@ -283,18 +402,11 @@ async function runSync() {
     invRes.data
   );
 
-  console.log("Fetching XML from MachineFinder...");
-  const xmlRes = await axios.post(process.env.XML_FEED_URL, {
-    key: process.env.MACHINEFINDER_KEY,
-    password: process.env.MACHINEFINDER_PASSWORD,
-  });
-
-  const machines = parseMachines(xmlRes.data);
-  console.log(`Found ${machines.length} machines. Starting sync...`);
-
+  const machines = await fetchFeedMachines();
   const incomingUniqueIds = machines
     .map((m) => m.id?.toString())
     .filter(Boolean);
+  console.log(`Found ${machines.length} machines. Starting sync...`);
 
   const changedItemIds = [];
   const failed = [];
@@ -400,6 +512,28 @@ async function main() {
 
   if (mode === "publish") {
     await doPublish();
+    return;
+  }
+
+  if (mode === "publish-all") {
+    await runPublishAll();
+    return;
+  }
+
+  if (mode === "sync-9570rx") {
+    await runSyncUniqueIds(JD_9570RX_UNIQUE_IDS);
+    return;
+  }
+
+  if (mode === "sync-ids") {
+    const ids = (process.argv[3] || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!ids.length) {
+      throw new Error("Usage: node sync.js sync-ids id1,id2,id3");
+    }
+    await runSyncUniqueIds(ids);
     return;
   }
 

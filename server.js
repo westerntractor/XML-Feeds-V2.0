@@ -16,6 +16,7 @@ const {
   startArchiveJob,
   publicJobView: publicArchiveJobView,
 } = require("./archiveJobs");
+const { syncFieldsEqual } = require("./fieldMap");
 
 const app = express();
 
@@ -59,39 +60,20 @@ function slugify(name, uniqueId) {
   return `${base || "item"}-${uniqueId}`;
 }
 
-const SYNC_FIELD_KEYS = [
-  "name",
-  "unique-id",
-  "advertised-price-amount",
-  "manufacturer-text",
-  "model-text",
-];
-
-function normalizeSyncFields(fields) {
-  return {
-    name: String(fields?.name || "").trim(),
-    "unique-id": Number(fields?.["unique-id"]),
-    "advertised-price-amount": Number(fields?.["advertised-price-amount"]) || 0,
-    "manufacturer-text": String(fields?.["manufacturer-text"] ?? "N/A"),
-    "model-text": String(fields?.["model-text"] ?? "N/A"),
-  };
-}
-
-function syncFieldsEqual(existingFieldData, incomingFields) {
-  const a = normalizeSyncFields(existingFieldData);
-  const b = normalizeSyncFields(incomingFields);
-  return SYNC_FIELD_KEYS.every((key) => a[key] === b[key]);
-}
-
-function buildItemBody(fields) {
+function buildItemBody(fields, { isUpdate = false } = {}) {
   const uniqueId = fields["unique-id"];
+  const fieldData = { ...fields };
+
+  if (isUpdate) {
+    delete fieldData.slug;
+  } else {
+    fieldData.slug = fields.slug || slugify(fields.name, uniqueId);
+  }
+
   return {
     isDraft: false,
     isArchived: false,
-    fieldData: {
-      ...fields,
-      slug: fields.slug || slugify(fields.name, uniqueId),
-    },
+    fieldData,
   };
 }
 
@@ -115,25 +97,75 @@ async function getAllCollectionItems() {
   return items;
 }
 
+function pickKeeper(candidates) {
+  const active = candidates.filter((item) => !item.isArchived);
+  const pool = active.length ? active : candidates;
+  return pool.sort(
+    (a, b) =>
+      new Date(b.lastUpdated || 0).getTime() -
+      new Date(a.lastUpdated || 0).getTime()
+  )[0];
+}
+
 function buildInventoryData(items) {
-  const map = {};
-  const fieldsByUniqueId = {};
+  const byUid = new Map();
   const duplicateItemIds = [];
 
   for (const item of items) {
     const uniqueId = item.fieldData?.["unique-id"];
     if (uniqueId == null) continue;
-
     const key = String(uniqueId);
-    if (map[key]) {
-      duplicateItemIds.push(item.id);
-    } else {
-      map[key] = item.id;
-      fieldsByUniqueId[key] = item.fieldData;
+    if (!byUid.has(key)) byUid.set(key, []);
+    byUid.get(key).push(item);
+  }
+
+  const map = {};
+  const fieldsByUniqueId = {};
+
+  for (const [key, group] of byUid) {
+    const keeper = pickKeeper(group);
+    map[key] = keeper.id;
+    fieldsByUniqueId[key] = keeper.fieldData;
+    for (const item of group) {
+      if (item.id !== keeper.id) duplicateItemIds.push(item.id);
     }
   }
 
   return { map, fieldsByUniqueId, duplicateItemIds };
+}
+
+function resolveFeedKeeperIds(items, incomingUniqueIds) {
+  const incoming = new Set(incomingUniqueIds.map((id) => String(id)));
+  const byUid = new Map();
+
+  for (const item of items) {
+    const uniqueId = item.fieldData?.["unique-id"];
+    if (uniqueId == null) continue;
+    const key = String(uniqueId);
+    if (!incoming.has(key)) continue;
+    if (!byUid.has(key)) byUid.set(key, []);
+    byUid.get(key).push(item);
+  }
+
+  const keeperItemIds = [];
+  const skippedArchived = [];
+  const missingInCms = [];
+
+  for (const uniqueId of incoming) {
+    const group = byUid.get(uniqueId);
+    if (!group?.length) {
+      missingInCms.push(uniqueId);
+      continue;
+    }
+    const keeper = pickKeeper(group);
+    if (keeper.isArchived) {
+      skippedArchived.push({ uniqueId, itemId: keeper.id });
+    } else {
+      keeperItemIds.push(keeper.id);
+    }
+  }
+
+  return { keeperItemIds, skippedArchived, missingInCms };
 }
 
 async function archiveItemById(itemId, label) {
@@ -156,6 +188,29 @@ app.get("/collection/inventory", async (req, res) => {
     res.json({ map, fieldsByUniqueId });
   } catch (e) {
     forwardWebflowError(res, e, "Webflow Inventory Fetch Error:");
+  }
+});
+
+/**
+ * POST resolve CMS item IDs to publish for machines currently in the feed.
+ * Body: { incomingUniqueIds: string[] | number[] }
+ */
+app.post("/collection/feed-keeper-ids", async (req, res) => {
+  const { incomingUniqueIds } = req.body;
+  if (!Array.isArray(incomingUniqueIds)) {
+    return res.status(400).json({ error: "incomingUniqueIds array is required" });
+  }
+
+  try {
+    const items = await getAllCollectionItems();
+    const result = resolveFeedKeeperIds(items, incomingUniqueIds);
+    res.json({
+      feedCount: incomingUniqueIds.length,
+      keeperCount: result.keeperItemIds.length,
+      ...result,
+    });
+  } catch (e) {
+    forwardWebflowError(res, e, "Feed Keeper IDs Error:");
   }
 });
 
@@ -261,7 +316,7 @@ app.post("/collection/item/sync", async (req, res) => {
       }
 
       const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${existingItemId}`;
-      const body = buildItemBody(fields);
+      const body = buildItemBody(fields, { isUpdate: true });
       console.log(`Updating machine: ${fields.name} (${existingItemId})`);
       const result = await webflowRequest(
         () => axios.patch(url, body, webflowConfig),
