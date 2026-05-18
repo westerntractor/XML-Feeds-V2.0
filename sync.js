@@ -331,13 +331,28 @@ async function runSync() {
   );
 
   const archivedItemIds = await archiveRemovedMachines(incomingUniqueIds);
-  const itemIdsToPublish = [
-    ...new Set([...changedItemIds, ...archivedItemIds]),
-  ];
+  const archivedCount = archivedItemIds.length;
+  const changedCount = changedItemIds.length;
 
-  console.log(`${itemIdsToPublish.length} items queued for CMS publish`);
-  await publishCmsItems(itemIdsToPublish);
-  await publishSite();
+  // Archived items cannot use items/publish — site publish applies removals live.
+  if (changedCount > 0) {
+    console.log(`${changedCount} created/updated items queued for CMS publish`);
+    await publishCmsItems(changedItemIds);
+  } else {
+    console.log("No created/updated items — skipping CMS item publish");
+  }
+
+  if (changedCount > 0 || archivedCount > 0) {
+    if (archivedCount > 0) {
+      console.log(
+        `${archivedCount} archived items will be reflected on the live site via site publish`
+      );
+    }
+    await publishSite();
+  } else {
+    console.log("No changes or archives — skipping site publish");
+  }
+
   console.log("Sync complete.");
 }
 
