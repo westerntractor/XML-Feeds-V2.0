@@ -165,49 +165,65 @@ async function syncMachineWithRetry(
   }
 }
 
-async function archiveRemovedMachines(incomingUniqueIds) {
-  console.log(
-    `Archiving CMS items not in feed (${incomingUniqueIds.length} active ids)...`
-  );
-  const res = await herokuRequest(
-    () =>
-      axios.post(`${HEROKU_URL}/collection/archive-removed`, {
-        incomingUniqueIds,
-      }),
-    "archive-removed"
-  );
-  const count = res.data.archivedItemIds?.length || 0;
-  console.log(`Archived ${count} removed/duplicate items`);
-  if (res.data.errors?.length) {
-    console.warn("Archive errors:", res.data.errors);
-  }
-  return res.data.archivedItemIds || [];
-}
-
-async function pollPublishJob(jobId) {
+async function pollJob(jobId, endpoint, label) {
   while (true) {
-    const res = await axios.get(`${HEROKU_URL}/publish-jobs/${jobId}`);
+    const res = await axios.get(`${HEROKU_URL}/${endpoint}/${jobId}`);
     const job = res.data;
 
     if (job.status === "done") {
-      console.log(
-        `CMS publish job complete: ${job.publishedItemIds?.length || 0} published`
-      );
-      if (job.errors?.length) {
-        console.warn("CMS publish errors:", job.errors);
-      }
       return job;
     }
 
     if (job.status === "failed") {
-      throw new Error(job.error || "CMS publish job failed");
+      throw new Error(job.error || `${label} job failed`);
     }
 
     console.log(
-      `CMS publish job ${job.status}: ${job.processed || 0}/${job.total || "?"}...`
+      `${label} job ${job.status}: ${job.processed || 0}/${job.total || "?"}...`
     );
     await sleep(JOB_POLL_INTERVAL_MS);
   }
+}
+
+async function archiveRemovedMachines(incomingUniqueIds) {
+  console.log(
+    `Starting async archive for items not in feed (${incomingUniqueIds.length} active ids)...`
+  );
+
+  const startRes = await herokuRequest(
+    () =>
+      axios.post(`${HEROKU_URL}/collection/archive-removed`, {
+        incomingUniqueIds,
+        async: true,
+      }),
+    "archive-removed-start"
+  );
+
+  const jobId = startRes.data.jobId;
+  if (!jobId) {
+    throw new Error("Server did not return an archive jobId");
+  }
+
+  console.log(`Archive job started: ${jobId}`);
+  const job = await pollJob(jobId, "archive-jobs", "Archive");
+
+  const count = job.archivedItemIds?.length || 0;
+  console.log(`Archived ${count} removed/duplicate items`);
+  if (job.errors?.length) {
+    console.warn("Archive errors:", job.errors);
+  }
+  return job.archivedItemIds || [];
+}
+
+async function pollPublishJob(jobId) {
+  const job = await pollJob(jobId, "publish-jobs", "CMS publish");
+  console.log(
+    `CMS publish job complete: ${job.publishedItemIds?.length || 0} published`
+  );
+  if (job.errors?.length) {
+    console.warn("CMS publish errors:", job.errors);
+  }
+  return job;
 }
 
 async function publishCmsItems(itemIds) {

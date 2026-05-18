@@ -6,11 +6,16 @@ const cors = require("cors");
 const { webflowRequest, SITE_PUBLISH_COOLDOWN_MS } = require("./rateLimit");
 const {
   PUBLISH_CHUNK_SIZE,
-  getJob,
+  getJob: getPublishJob,
   startPublishJob,
   publishItemsSync,
-  publicJobView,
+  publicJobView: publicPublishJobView,
 } = require("./publishJobs");
+const {
+  getJob: getArchiveJob,
+  startArchiveJob,
+  publicJobView: publicArchiveJobView,
+} = require("./archiveJobs");
 
 const app = express();
 
@@ -154,17 +159,34 @@ app.get("/collection/inventory", async (req, res) => {
   }
 });
 
+const archiveJobContext = () => ({
+  getAllCollectionItems,
+  buildInventoryData,
+  archiveItemById,
+});
+
 /**
  * POST archive CMS items no longer in the MachineFinder feed.
- * Body: { incomingUniqueIds: string[] | number[] }
+ * Body: { incomingUniqueIds: string[] | number[], async?: boolean }
  */
 app.post("/collection/archive-removed", async (req, res) => {
-  const { incomingUniqueIds } = req.body;
+  const { incomingUniqueIds, async: runAsync } = req.body;
   if (!Array.isArray(incomingUniqueIds)) {
     return res.status(400).json({ error: "incomingUniqueIds array is required" });
   }
 
+  const useAsync = runAsync === true || runAsync === "true";
+
   try {
+    if (useAsync) {
+      const job = startArchiveJob(incomingUniqueIds, archiveJobContext());
+      return res.status(202).json({
+        jobId: job.id,
+        status: job.status,
+        message: "Archive job started",
+      });
+    }
+
     const incoming = new Set(incomingUniqueIds.map((id) => String(id)));
     const items = await getAllCollectionItems();
     const { duplicateItemIds } = buildInventoryData(items);
@@ -175,7 +197,6 @@ app.post("/collection/archive-removed", async (req, res) => {
       try {
         await archiveItemById(itemId, `archive-duplicate:${itemId}`);
         archivedItemIds.push(itemId);
-        console.log(`Archived duplicate item: ${itemId}`);
       } catch (e) {
         errors.push({ itemId, error: e.response?.data || e.message });
       }
@@ -183,17 +204,12 @@ app.post("/collection/archive-removed", async (req, res) => {
 
     for (const item of items) {
       if (item.isArchived) continue;
-
       const uniqueId = item.fieldData?.["unique-id"];
       if (uniqueId == null) continue;
-
       if (!incoming.has(String(uniqueId))) {
         try {
           await archiveItemById(item.id, `archive-removed:${uniqueId}`);
           archivedItemIds.push(item.id);
-          console.log(
-            `Archived removed machine unique-id ${uniqueId} (${item.id})`
-          );
         } catch (e) {
           errors.push({
             itemId: item.id,
@@ -204,11 +220,18 @@ app.post("/collection/archive-removed", async (req, res) => {
       }
     }
 
-    console.log(`Archived ${archivedItemIds.length} items`);
     res.json({ archivedItemIds, errors });
   } catch (e) {
     forwardWebflowError(res, e, "Archive Removed Error:");
   }
+});
+
+app.get("/archive-jobs/:jobId", (req, res) => {
+  const job = getArchiveJob(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job not found" });
+  }
+  res.json(publicArchiveJobView(job));
 });
 
 app.post("/collection/item/sync", async (req, res) => {
@@ -294,11 +317,11 @@ app.post("/collection/items/publish", async (req, res) => {
 });
 
 app.get("/publish-jobs/:jobId", (req, res) => {
-  const job = getJob(req.params.jobId);
+  const job = getPublishJob(req.params.jobId);
   if (!job) {
     return res.status(404).json({ error: "Job not found" });
   }
-  res.json(publicJobView(job));
+  res.json(publicPublishJobView(job));
 });
 
 app.post("/site/publish", async (req, res) => {
