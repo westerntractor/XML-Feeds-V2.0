@@ -2,3 +2,5 @@
 /package-lock.json
 config
 node_modules/
+ws.env
+wt.env
