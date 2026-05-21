@@ -12,6 +12,19 @@ const MAX_IMAGES_PER_MACHINE = parseInt(
   10
 );
 
+const SECOND_GALLERY_BY_COLLECTION = {
+  "63090c9ea77ee20faacea709": "image-gallery2-2",
+  "637cec1ebb30b75ef8186fd7": "image-gallery2",
+};
+
+function secondGalleryFieldSlug() {
+  if (process.env.IMAGE_GALLERY2_FIELD) {
+    return process.env.IMAGE_GALLERY2_FIELD.trim();
+  }
+  const collectionId = process.env.COLLECTION_ID || "";
+  return SECOND_GALLERY_BY_COLLECTION[collectionId] || "image-gallery2-2";
+}
+
 const SYNC_FIELD_KEYS = [
   "name",
   "unique-id",
@@ -71,10 +84,9 @@ function toWebflowImage(sourceUrl, role = "gallery") {
 function mapImages(urls) {
   if (!urls.length) return {};
   const gallery = urls.map((u) => toWebflowImage(u, "gallery"));
-  const out = {
-    "image-gallery": gallery,
-    "image-gallery2-2": gallery,
-  };
+  const out = { "image-gallery": gallery };
+  const secondGallery = secondGalleryFieldSlug();
+  if (secondGallery) out[secondGallery] = gallery;
   if (urls[0]) out.image1 = toWebflowImage(urls[0], "thumb");
   if (urls[1]) out.image2 = toWebflowImage(urls[1], "thumb");
   if (urls[2]) out.image3 = toWebflowImage(urls[2], "thumb");
