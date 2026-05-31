@@ -2,6 +2,7 @@ const test = require("assert");
 const {
   buildCatalogMachines,
   queryUsedEquipment,
+  machineDetailUrl,
 } = require("./usedEquipmentCatalog");
 
 const sampleItems = [
@@ -20,6 +21,7 @@ const sampleItems = [
       "advertised-price-currency": "CAD",
       operationhours: 1200,
       "image-first-url": "https://example.com/a.jpg",
+      slug: "john-deere-8r-370-1",
     },
   },
   {
@@ -46,6 +48,19 @@ const sampleItems = [
 
 const machines = buildCatalogMachines(sampleItems);
 test.strictEqual(machines.length, 2);
+
+const tractor = machines.find((m) => m.uniqueId === 1);
+test.ok(tractor, "keeper row for unique-id 1");
+test.strictEqual(
+  tractor.url,
+  "/machines/john-deere-8r-370-1",
+  "url should use CMS slug, not raw unique-id"
+);
+test.strictEqual(tractor.slug, "john-deere-8r-370-1");
+test.strictEqual(
+  machineDetailUrl({ slug: "custom-slug" }, 99),
+  "/machines/custom-slug"
+);
 
 const filtered = queryUsedEquipment(machines, {
   category: "Combine",

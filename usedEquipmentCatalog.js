@@ -1,6 +1,8 @@
 /** Used equipment catalog: normalize CMS items, filter, paginate, cascade options. */
 
 const CACHE_TTL_MS = 2 * 60 * 1000;
+const MACHINE_DETAIL_PATH =
+  process.env.MACHINE_DETAIL_PATH || "/machines/";
 
 let catalogCache = null;
 let catalogCacheAt = 0;
@@ -27,6 +29,24 @@ function pickKeeper(candidates) {
   )[0];
 }
 
+function slugify(name, uniqueId) {
+  const base = String(name || "item")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${base || "item"}-${uniqueId}`;
+}
+
+function machineDetailUrl(fieldData, uniqueId) {
+  const slug =
+    fieldData?.slug ||
+    slugify(String(fieldData?.name || "").trim(), uniqueId);
+  const prefix = MACHINE_DETAIL_PATH.endsWith("/")
+    ? MACHINE_DETAIL_PATH
+    : `${MACHINE_DETAIL_PATH}/`;
+  return `${prefix}${slug}`;
+}
+
 function imageUrl(fieldData) {
   const first = fieldData?.["image-first-url"];
   if (first) return first;
@@ -45,11 +65,14 @@ function machineFromItem(item) {
 
   const price = Number(f["advertised-price-amount"]) || 0;
   const year = parseNumber(f["modelyear-text"]) || 0;
+  const name = String(f.name || "").trim();
+  const slug = String(f.slug || slugify(name, uniqueId)).trim();
 
   return {
     itemId: item.id,
     uniqueId: Number(uniqueId),
-    name: String(f.name || "").trim(),
+    slug,
+    name,
     category: String(f["category-text"] || "").trim(),
     make: String(f["manufacturer-text"] || "").trim(),
     model: String(f["model-text"] || "").trim(),
@@ -60,7 +83,7 @@ function machineFromItem(item) {
     hours: Number(f.operationhours) || 0,
     stockNumber: String(f.stocknumber || "").trim(),
     image: imageUrl(f),
-    url: `/machines/${uniqueId}`,
+    url: machineDetailUrl(f, uniqueId),
   };
 }
 
@@ -255,4 +278,6 @@ module.exports = {
   getCatalogMachines,
   queryUsedEquipment,
   parseFilters,
+  slugify,
+  machineDetailUrl,
 };

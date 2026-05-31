@@ -7,6 +7,31 @@
   - Deploy GET /collection/used-equipment on Heroku (Western Sales app)
   - Update API_BASE below to your Heroku URL
 -->
+<style>
+  .fs-rangeslider_track {
+    position: relative;
+  }
+  .fs-rangeslider_fill {
+    position: absolute;
+    top: 0;
+    height: 100%;
+  }
+  .fs-rangeslider_handle {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    touch-action: none;
+    cursor: grab;
+  }
+  .fs-rangeslider_handle:active {
+    cursor: grabbing;
+  }
+  .ue-pagination-status {
+    display: inline-block;
+    margin: 0 12px;
+    vertical-align: middle;
+  }
+</style>
 <script>
 (function () {
   "use strict";
@@ -15,10 +40,12 @@
     "https://appwswebsite-ce3c49259d6a.herokuapp.com/collection/used-equipment";
   var PAGE_SIZE = 12;
   var SEARCH_DEBOUNCE_MS = 350;
+  var RANGE_DEBOUNCE_MS = 350;
 
   var els = {
-    form: document.querySelector("form[fs-list-element='filters']") ||
-      document.querySelector(".filter-form") ||
+    form:
+      document.getElementById("email-form") ||
+      document.querySelector(".c-search__form") ||
       document.querySelector("form.w-form"),
     grid: document.getElementById("main-list"),
     wrapper: document.getElementById("seamless-replace"),
@@ -33,14 +60,19 @@
     yearMax: document.getElementById("field-2"),
     priceMin: document.getElementById("field-3"),
     priceMax: document.getElementById("field-4"),
-    reset:
-      document.querySelector("a.reset-button.c-bavly") ||
-      document.querySelector("[fs-list-element='clear']"),
+    reset: document.querySelector("a.reset-button.c-bavly"),
   };
 
   var cardTemplate = null;
   var slimSelects = {};
   var searchTimer = null;
+  var rangeSliders = { year: null, price: null };
+  var catalogBounds = {
+    yearMin: 1990,
+    yearMax: new Date().getFullYear(),
+    priceMin: 0,
+    priceMax: 1600000,
+  };
   var loading = false;
 
   function commaNum(n) {
@@ -119,6 +151,17 @@
       els.priceMax.value = params.get("priceMax");
   }
 
+  function applyCatalogBounds(bounds) {
+    if (!bounds) return;
+    if (bounds.yearMin != null) catalogBounds.yearMin = bounds.yearMin;
+    if (bounds.yearMax != null) catalogBounds.yearMax = bounds.yearMax;
+    if (bounds.priceMin != null) catalogBounds.priceMin = bounds.priceMin;
+    if (bounds.priceMax != null) catalogBounds.priceMax = bounds.priceMax;
+
+    if (rangeSliders.year) rangeSliders.year.setBounds(catalogBounds.yearMin, catalogBounds.yearMax);
+    if (rangeSliders.price) rangeSliders.price.setBounds(catalogBounds.priceMin, catalogBounds.priceMax);
+  }
+
   function destroySlimSelect(key) {
     if (slimSelects[key] && typeof slimSelects[key].destroy === "function") {
       slimSelects[key].destroy();
@@ -191,13 +234,13 @@
       img.src = machine.image || img.src;
       img.alt = machine.name || "";
     }
-    setField(card, '[fs-list-field="year"]', machine.year || "");
-    setField(card, '[fs-list-field="make"]', machine.make || "");
-    setField(card, '[fs-list-field="model"]', machine.model || "");
-    setField(card, '[fs-list-field="category"]', machine.category || "");
-    setField(card, '[fs-list-field="location"]', machine.location || "");
+    setField(card, ".year-block h3", machine.year || "");
+    setField(card, ".make-block h3", machine.make || "");
+    setField(card, ".model-block h3", machine.model || "");
+    setField(card, ".machine_category", machine.category || "");
+    setField(card, ".location-block h3", machine.location || "");
     setField(card, ".hour-value-3", machine.hours || 0);
-    var priceEl = card.querySelector('[fs-list-field="price"]');
+    var priceEl = card.querySelector("h3.listing-address-2.price");
     if (priceEl) priceEl.textContent = commaNum(Math.round(machine.price || 0));
     var link = card.querySelector("a.link-block-21") || card.querySelector("a");
     if (link) link.href = machine.url || link.href;
@@ -215,7 +258,20 @@
     }
   }
 
-  function renderPagination(pagination, filters) {
+  function bindPaginationLink(link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      if (link.getAttribute("aria-disabled") === "true") return;
+      var nextPage = parseInt(link.getAttribute("data-page"), 10);
+      if (!isFinite(nextPage) || nextPage < 1) return;
+      var f = readFilters();
+      f.page = nextPage;
+      fetchAndRender(f);
+      els.grid.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  function renderPagination(pagination) {
     if (!els.pagination) return;
     var page = pagination.page;
     var totalPages = pagination.totalPages;
@@ -229,32 +285,20 @@
 
     var prevDisabled = page <= 1;
     var nextDisabled = page >= totalPages;
-    var html = "";
 
-    html +=
+    els.pagination.innerHTML =
       '<a href="#" data-page="' +
       (page - 1) +
       '" aria-label="Previous Page" class="w-pagination-previous' +
       (prevDisabled ? " is-list-pagination-disabled" : "") +
       '"' +
       (prevDisabled ? ' aria-disabled="true" tabindex="-1"' : "") +
-      ">Previous</a>";
-
-    html += '<nav class="w-pagination-pages" aria-label="Pages">';
-    for (var p = 1; p <= totalPages; p++) {
-      var active = p === page ? " w-active" : "";
-      html +=
-        '<a href="#" data-page="' +
-        p +
-        '" class="w-pagination-page' +
-        active +
-        '">' +
-        p +
-        "</a>";
-    }
-    html += "</nav>";
-
-    html +=
+      ">Previous</a>" +
+      '<div class="ue-pagination-status w-pagination-page w-active">Page ' +
+      page +
+      " of " +
+      totalPages +
+      "</div>" +
       '<a href="#" data-page="' +
       (page + 1) +
       '" aria-label="Next Page" class="w-pagination-next' +
@@ -263,20 +307,206 @@
       (nextDisabled ? ' aria-disabled="true" tabindex="-1"' : "") +
       ">Next</a>";
 
-    els.pagination.innerHTML = html;
+    els.pagination.querySelectorAll("[data-page]").forEach(bindPaginationLink);
+  }
 
-    els.pagination.querySelectorAll("[data-page]").forEach(function (link) {
-      link.addEventListener("click", function (e) {
-        e.preventDefault();
-        if (link.getAttribute("aria-disabled") === "true") return;
-        var nextPage = parseInt(link.getAttribute("data-page"), 10);
-        if (!isFinite(nextPage) || nextPage < 1) return;
-        var f = readFilters();
-        f.page = nextPage;
-        fetchAndRender(f);
-        els.grid.scrollIntoView({ behavior: "smooth", block: "start" });
-      });
+  function initDualRangeSlider(opts) {
+    var wrapper = opts.wrapper;
+    if (!wrapper) return null;
+
+    var track = wrapper.querySelector(".fs-rangeslider_track");
+    var fill = wrapper.querySelector(".fs-rangeslider_fill");
+    var handles = wrapper.querySelectorAll(".fs-rangeslider_handle");
+    if (!track || handles.length < 2) return null;
+
+    var loHandle = handles[0];
+    var hiHandle = handles[1];
+    var state = {
+      min: opts.min,
+      max: opts.max,
+      step: opts.step || 1,
+    };
+    var activeHandle = null;
+    var rangeTimer = null;
+
+    function snap(v) {
+      return Math.round(v / state.step) * state.step;
+    }
+
+    function clamp(v) {
+      return Math.max(state.min, Math.min(state.max, v));
+    }
+
+    function readLoHi() {
+      var lo = parseInputNumber(opts.minInput);
+      var hi = parseInputNumber(opts.maxInput);
+      if (lo == null) lo = state.min;
+      if (hi == null) hi = state.max;
+      lo = clamp(snap(Math.min(lo, hi)));
+      hi = clamp(snap(Math.max(lo, hi)));
+      return { lo: lo, hi: hi };
+    }
+
+    function format(v) {
+      return opts.format ? opts.format(v) : String(v);
+    }
+
+    function paint(lo, hi) {
+      var span = state.max - state.min || 1;
+      var leftPct = ((lo - state.min) / span) * 100;
+      var rightPct = ((hi - state.min) / span) * 100;
+      loHandle.style.left = leftPct + "%";
+      hiHandle.style.left = rightPct + "%";
+      if (fill) {
+        fill.style.left = leftPct + "%";
+        fill.style.width = Math.max(0, rightPct - leftPct) + "%";
+      }
+      var displays = opts.displays || [];
+      if (displays[0]) displays[0].textContent = format(lo);
+      if (displays[1]) displays[1].textContent = format(hi);
+    }
+
+    function valueFromClientX(clientX) {
+      var rect = track.getBoundingClientRect();
+      if (!rect.width) return state.min;
+      var ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      return clamp(snap(state.min + ratio * (state.max - state.min)));
+    }
+
+    function triggerFilterDebounced() {
+      clearTimeout(rangeTimer);
+      rangeTimer = setTimeout(function () {
+        onFilterChange(true);
+      }, RANGE_DEBOUNCE_MS);
+    }
+
+    function onPointerMove(e) {
+      if (!activeHandle) return;
+      var val = valueFromClientX(e.clientX);
+      var v = readLoHi();
+      if (activeHandle === loHandle) {
+        v.lo = Math.min(val, v.hi);
+        if (opts.minInput) {
+          opts.minInput.value = v.lo > state.min ? String(v.lo) : "";
+        }
+      } else {
+        v.hi = Math.max(val, v.lo);
+        if (opts.maxInput) {
+          opts.maxInput.value = v.hi < state.max ? String(v.hi) : "";
+        }
+      }
+      paint(v.lo, v.hi);
+    }
+
+    function onPointerUp() {
+      if (!activeHandle) return;
+      activeHandle = null;
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
+      triggerFilterDebounced();
+    }
+
+    function onPointerDown(e, handle) {
+      e.preventDefault();
+      activeHandle = handle;
+      document.addEventListener("pointermove", onPointerMove);
+      document.addEventListener("pointerup", onPointerUp);
+    }
+
+    loHandle.addEventListener("pointerdown", function (e) {
+      onPointerDown(e, loHandle);
     });
+    hiHandle.addEventListener("pointerdown", function (e) {
+      onPointerDown(e, hiHandle);
+    });
+
+    function syncFromInputs(triggerFilter) {
+      var v = readLoHi();
+      paint(v.lo, v.hi);
+      if (triggerFilter) triggerFilterDebounced();
+    }
+
+    function bindRangeInput(el) {
+      if (!el) return;
+      el.addEventListener("input", function () {
+        syncFromInputs(true);
+      });
+      el.addEventListener("change", function () {
+        syncFromInputs(true);
+      });
+    }
+
+    bindRangeInput(opts.minInput);
+    bindRangeInput(opts.maxInput);
+
+    if (opts.minInput) opts.minInput.placeholder = String(state.min);
+    if (opts.maxInput) opts.maxInput.placeholder = String(state.max);
+    var initial = readLoHi();
+    paint(initial.lo, initial.hi);
+
+    return {
+      setBounds: function (min, max) {
+        state.min = min;
+        state.max = max;
+        if (opts.minInput) opts.minInput.placeholder = String(min);
+        if (opts.maxInput) opts.maxInput.placeholder = String(max);
+        var v = readLoHi();
+        paint(v.lo, v.hi);
+      },
+      sync: function () {
+        var v = readLoHi();
+        paint(v.lo, v.hi);
+      },
+      reset: function () {
+        if (opts.minInput) opts.minInput.value = "";
+        if (opts.maxInput) opts.maxInput.value = "";
+        paint(state.min, state.max);
+      },
+    };
+  }
+
+  function initRangeSliders() {
+    var yearWrapper = els.yearMin && els.yearMin.closest(".fs-rangeslider_wrapper");
+    var priceWrapper = els.priceMin && els.priceMin.closest(".fs-rangeslider_wrapper");
+
+    if (yearWrapper) {
+      rangeSliders.year = initDualRangeSlider({
+        wrapper: yearWrapper,
+        minInput: els.yearMin,
+        maxInput: els.yearMax,
+        min: catalogBounds.yearMin,
+        max: catalogBounds.yearMax,
+        step: 1,
+        displays: yearWrapper.querySelectorAll(".range-slider-value"),
+        format: String,
+      });
+    }
+
+    if (priceWrapper) {
+      var priceDisplays = [];
+      var d52 = priceWrapper.querySelector(".div-block-52 .range-slider-value");
+      var d53 = priceWrapper.querySelector(".div-block-53 .range-slider-value");
+      if (d52) priceDisplays.push(d52);
+      if (d53) priceDisplays.push(d53);
+      if (!priceDisplays.length) {
+        priceDisplays = Array.prototype.slice.call(
+          priceWrapper.querySelectorAll(".range-slider-value")
+        );
+      }
+
+      rangeSliders.price = initDualRangeSlider({
+        wrapper: priceWrapper,
+        minInput: els.priceMin,
+        maxInput: els.priceMax,
+        min: catalogBounds.priceMin,
+        max: catalogBounds.priceMax,
+        step: 5000,
+        displays: priceDisplays,
+        format: function (v) {
+          return commaNum(v);
+        },
+      });
+    }
   }
 
   function setLoading(isLoading) {
@@ -298,9 +528,10 @@
         return res.json();
       })
       .then(function (data) {
+        applyCatalogBounds(data.bounds);
         updateSelectOptions(data.filterOptions || {}, filters);
         renderGrid(data.items || []);
-        renderPagination(data.pagination || { page: 1, totalPages: 1 }, filters);
+        renderPagination(data.pagination || { page: 1, totalPages: 1 });
       })
       .catch(function (err) {
         console.error("[used-equipment]", err);
@@ -323,10 +554,8 @@
     if (els.make) els.make.value = "";
     if (els.model) els.model.value = "";
     if (els.location) els.location.value = "";
-    if (els.yearMin) els.yearMin.value = "";
-    if (els.yearMax) els.yearMax.value = "";
-    if (els.priceMin) els.priceMin.value = "";
-    if (els.priceMax) els.priceMax.value = "";
+    if (rangeSliders.year) rangeSliders.year.reset();
+    if (rangeSliders.price) rangeSliders.price.reset();
     var filters = readFilters();
     filters.page = 1;
     fetchAndRender(filters);
@@ -359,13 +588,6 @@
         onFilterChange(true);
       });
     }
-
-    [els.yearMin, els.yearMax, els.priceMin, els.priceMax].forEach(function (el) {
-      if (!el) return;
-      el.addEventListener("change", function () {
-        onFilterChange(true);
-      });
-    });
 
     if (els.search) {
       els.search.addEventListener("input", function () {
@@ -405,7 +627,11 @@
     ensureCardTemplate();
     if (!cardTemplate) return;
 
+    initRangeSliders();
     applyFiltersFromUrl();
+    if (rangeSliders.year) rangeSliders.year.sync();
+    if (rangeSliders.price) rangeSliders.price.sync();
+
     bindEvents();
     fetchAndRender(readFilters());
   }
