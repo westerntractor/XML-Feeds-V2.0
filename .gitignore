@@ -5,3 +5,5 @@ node_modules/
 ws.env
 wt.env
 *.env
+current.html
+USED-EQUIPMENT-SETUP.md

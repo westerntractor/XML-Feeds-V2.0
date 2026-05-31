@@ -1,0 +1,419 @@
+<!--
+  Paste into Webflow: Used Equipment page → Page Settings → Custom Code → Before </body>
+
+  Prerequisites:
+  - Finsweet Attributes (fs-list / fs-rangeslider) REMOVED from this page
+  - Hidden *-ops lists REMOVED
+  - Deploy GET /collection/used-equipment on Heroku (Western Sales app)
+  - Update API_BASE below to your Heroku URL
+-->
+<script>
+(function () {
+  "use strict";
+
+  var API_BASE =
+    "https://appwswebsite-ce3c49259d6a.herokuapp.com/collection/used-equipment";
+  var PAGE_SIZE = 12;
+  var SEARCH_DEBOUNCE_MS = 350;
+
+  var els = {
+    form: document.querySelector("form[fs-list-element='filters']") ||
+      document.querySelector(".filter-form") ||
+      document.querySelector("form.w-form"),
+    grid: document.getElementById("main-list"),
+    wrapper: document.getElementById("seamless-replace"),
+    empty: null,
+    pagination: null,
+    search: document.getElementById("name"),
+    category: document.getElementById("category"),
+    make: document.getElementById("make"),
+    model: document.getElementById("model"),
+    location: document.getElementById("location"),
+    yearMin: document.getElementById("field"),
+    yearMax: document.getElementById("field-2"),
+    priceMin: document.getElementById("field-3"),
+    priceMax: document.getElementById("field-4"),
+    reset:
+      document.querySelector("a.reset-button.c-bavly") ||
+      document.querySelector("[fs-list-element='clear']"),
+  };
+
+  var cardTemplate = null;
+  var slimSelects = {};
+  var searchTimer = null;
+  var loading = false;
+
+  function commaNum(n) {
+    if (typeof numberWithCommas === "function") return numberWithCommas(n);
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+
+  function parseInputNumber(el) {
+    if (!el || el.value == null || el.value === "") return null;
+    var n = Number(String(el.value).replace(/,/g, ""));
+    return isFinite(n) ? n : null;
+  }
+
+  function readFilters() {
+    return {
+      category: els.category ? els.category.value : "",
+      make: els.make ? els.make.value : "",
+      model: els.model ? els.model.value : "",
+      location: els.location ? els.location.value : "",
+      yearMin: parseInputNumber(els.yearMin),
+      yearMax: parseInputNumber(els.yearMax),
+      priceMin: parseInputNumber(els.priceMin),
+      priceMax: parseInputNumber(els.priceMax),
+      q: els.search ? els.search.value.trim() : "",
+      page: readPageFromUrl(),
+      limit: PAGE_SIZE,
+    };
+  }
+
+  function readPageFromUrl() {
+    var params = new URLSearchParams(window.location.search);
+    var page = parseInt(params.get("page") || "1", 10);
+    return isFinite(page) && page > 0 ? page : 1;
+  }
+
+  function buildApiUrl(filters) {
+    var params = new URLSearchParams();
+    Object.keys(filters).forEach(function (key) {
+      var val = filters[key];
+      if (val != null && val !== "") params.set(key, String(val));
+    });
+    return API_BASE + "?" + params.toString();
+  }
+
+  function syncUrl(filters) {
+    var params = new URLSearchParams();
+    ["category", "make", "model", "location", "q"].forEach(function (key) {
+      if (filters[key]) params.set(key, filters[key]);
+    });
+    if (filters.yearMin != null) params.set("yearMin", filters.yearMin);
+    if (filters.yearMax != null) params.set("yearMax", filters.yearMax);
+    if (filters.priceMin != null) params.set("priceMin", filters.priceMin);
+    if (filters.priceMax != null) params.set("priceMax", filters.priceMax);
+    if (filters.page > 1) params.set("page", filters.page);
+    var qs = params.toString();
+    var next = window.location.pathname + (qs ? "?" + qs : "");
+    window.history.replaceState({}, "", next);
+  }
+
+  function applyFiltersFromUrl() {
+    var params = new URLSearchParams(window.location.search);
+    if (els.category && params.has("category"))
+      els.category.value = params.get("category");
+    if (els.make && params.has("make")) els.make.value = params.get("make");
+    if (els.model && params.has("model")) els.model.value = params.get("model");
+    if (els.location && params.has("location"))
+      els.location.value = params.get("location");
+    if (els.search && params.has("q")) els.search.value = params.get("q");
+    if (els.yearMin && params.has("yearMin"))
+      els.yearMin.value = params.get("yearMin");
+    if (els.yearMax && params.has("yearMax"))
+      els.yearMax.value = params.get("yearMax");
+    if (els.priceMin && params.has("priceMin"))
+      els.priceMin.value = params.get("priceMin");
+    if (els.priceMax && params.has("priceMax"))
+      els.priceMax.value = params.get("priceMax");
+  }
+
+  function destroySlimSelect(key) {
+    if (slimSelects[key] && typeof slimSelects[key].destroy === "function") {
+      slimSelects[key].destroy();
+    }
+    slimSelects[key] = null;
+  }
+
+  function initSlimSelect(key, selectEl) {
+    if (!selectEl || typeof SlimSelect === "undefined") return;
+    destroySlimSelect(key);
+    slimSelects[key] = new SlimSelect({ select: selectEl });
+  }
+
+  function populateSelect(selectEl, options, selected) {
+    if (!selectEl) return;
+    selectEl.innerHTML = "";
+    var blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "Select one...";
+    selectEl.appendChild(blank);
+    options.forEach(function (opt) {
+      var option = document.createElement("option");
+      option.value = opt;
+      option.textContent = opt;
+      selectEl.appendChild(option);
+    });
+    if (selected && options.indexOf(selected) !== -1) {
+      selectEl.value = selected;
+    } else {
+      selectEl.value = "";
+    }
+  }
+
+  function updateSelectOptions(filterOptions, filters) {
+    populateSelect(els.category, filterOptions.categories, filters.category);
+    populateSelect(els.make, filterOptions.makes, filters.make);
+    populateSelect(els.model, filterOptions.models, filters.model);
+    populateSelect(els.location, filterOptions.locations, filters.location);
+
+    initSlimSelect("category", els.category);
+    initSlimSelect("make", els.make);
+    initSlimSelect("model", els.model);
+    initSlimSelect("location", els.location);
+
+    if (els.category && filters.category) els.category.value = filters.category;
+    if (els.make && filters.make) els.make.value = filters.make;
+    if (els.model && filters.model) els.model.value = filters.model;
+    if (els.location && filters.location) els.location.value = filters.location;
+  }
+
+  function ensureCardTemplate() {
+    if (cardTemplate || !els.grid) return;
+    var first = els.grid.querySelector(".listing-item.main-item");
+    if (!first) {
+      console.error("[used-equipment] No .listing-item.main-item template in #main-list");
+      return;
+    }
+    cardTemplate = first.cloneNode(true);
+  }
+
+  function setField(root, selector, text) {
+    var node = root.querySelector(selector);
+    if (node) node.textContent = text != null ? String(text) : "";
+  }
+
+  function renderCard(machine) {
+    var card = cardTemplate.cloneNode(true);
+    var img = card.querySelector(".listing-image");
+    if (img) {
+      img.src = machine.image || img.src;
+      img.alt = machine.name || "";
+    }
+    setField(card, '[fs-list-field="year"]', machine.year || "");
+    setField(card, '[fs-list-field="make"]', machine.make || "");
+    setField(card, '[fs-list-field="model"]', machine.model || "");
+    setField(card, '[fs-list-field="category"]', machine.category || "");
+    setField(card, '[fs-list-field="location"]', machine.location || "");
+    setField(card, ".hour-value-3", machine.hours || 0);
+    var priceEl = card.querySelector('[fs-list-field="price"]');
+    if (priceEl) priceEl.textContent = commaNum(Math.round(machine.price || 0));
+    var link = card.querySelector("a.link-block-21") || card.querySelector("a");
+    if (link) link.href = machine.url || link.href;
+    return card;
+  }
+
+  function renderGrid(items) {
+    if (!els.grid || !cardTemplate) return;
+    els.grid.innerHTML = "";
+    items.forEach(function (machine) {
+      els.grid.appendChild(renderCard(machine));
+    });
+    if (els.empty) {
+      els.empty.style.display = items.length ? "none" : "block";
+    }
+  }
+
+  function renderPagination(pagination, filters) {
+    if (!els.pagination) return;
+    var page = pagination.page;
+    var totalPages = pagination.totalPages;
+
+    if (totalPages <= 1) {
+      els.pagination.innerHTML = "";
+      els.pagination.style.display = "none";
+      return;
+    }
+    els.pagination.style.display = "";
+
+    var prevDisabled = page <= 1;
+    var nextDisabled = page >= totalPages;
+    var html = "";
+
+    html +=
+      '<a href="#" data-page="' +
+      (page - 1) +
+      '" aria-label="Previous Page" class="w-pagination-previous' +
+      (prevDisabled ? " is-list-pagination-disabled" : "") +
+      '"' +
+      (prevDisabled ? ' aria-disabled="true" tabindex="-1"' : "") +
+      ">Previous</a>";
+
+    html += '<nav class="w-pagination-pages" aria-label="Pages">';
+    for (var p = 1; p <= totalPages; p++) {
+      var active = p === page ? " w-active" : "";
+      html +=
+        '<a href="#" data-page="' +
+        p +
+        '" class="w-pagination-page' +
+        active +
+        '">' +
+        p +
+        "</a>";
+    }
+    html += "</nav>";
+
+    html +=
+      '<a href="#" data-page="' +
+      (page + 1) +
+      '" aria-label="Next Page" class="w-pagination-next' +
+      (nextDisabled ? " is-list-pagination-disabled" : "") +
+      '"' +
+      (nextDisabled ? ' aria-disabled="true" tabindex="-1"' : "") +
+      ">Next</a>";
+
+    els.pagination.innerHTML = html;
+
+    els.pagination.querySelectorAll("[data-page]").forEach(function (link) {
+      link.addEventListener("click", function (e) {
+        e.preventDefault();
+        if (link.getAttribute("aria-disabled") === "true") return;
+        var nextPage = parseInt(link.getAttribute("data-page"), 10);
+        if (!isFinite(nextPage) || nextPage < 1) return;
+        var f = readFilters();
+        f.page = nextPage;
+        fetchAndRender(f);
+        els.grid.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+  }
+
+  function setLoading(isLoading) {
+    loading = isLoading;
+    if (els.wrapper) {
+      els.wrapper.style.opacity = isLoading ? "0.55" : "1";
+      els.wrapper.style.pointerEvents = isLoading ? "none" : "";
+    }
+  }
+
+  function fetchAndRender(filters) {
+    if (loading) return;
+    setLoading(true);
+    syncUrl(filters);
+
+    fetch(buildApiUrl(filters))
+      .then(function (res) {
+        if (!res.ok) throw new Error("API " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        updateSelectOptions(data.filterOptions || {}, filters);
+        renderGrid(data.items || []);
+        renderPagination(data.pagination || { page: 1, totalPages: 1 }, filters);
+      })
+      .catch(function (err) {
+        console.error("[used-equipment]", err);
+        if (els.empty) els.empty.style.display = "block";
+      })
+      .finally(function () {
+        setLoading(false);
+      });
+  }
+
+  function onFilterChange(resetPage) {
+    var filters = readFilters();
+    if (resetPage) filters.page = 1;
+    fetchAndRender(filters);
+  }
+
+  function resetFilters() {
+    if (els.search) els.search.value = "";
+    if (els.category) els.category.value = "";
+    if (els.make) els.make.value = "";
+    if (els.model) els.model.value = "";
+    if (els.location) els.location.value = "";
+    if (els.yearMin) els.yearMin.value = "";
+    if (els.yearMax) els.yearMax.value = "";
+    if (els.priceMin) els.priceMin.value = "";
+    if (els.priceMax) els.priceMax.value = "";
+    var filters = readFilters();
+    filters.page = 1;
+    fetchAndRender(filters);
+  }
+
+  function bindEvents() {
+    if (els.category) {
+      els.category.addEventListener("change", function () {
+        if (els.make) els.make.value = "";
+        if (els.model) els.model.value = "";
+        if (els.location) els.location.value = "";
+        onFilterChange(true);
+      });
+    }
+    if (els.make) {
+      els.make.addEventListener("change", function () {
+        if (els.model) els.model.value = "";
+        if (els.location) els.location.value = "";
+        onFilterChange(true);
+      });
+    }
+    if (els.model) {
+      els.model.addEventListener("change", function () {
+        if (els.location) els.location.value = "";
+        onFilterChange(true);
+      });
+    }
+    if (els.location) {
+      els.location.addEventListener("change", function () {
+        onFilterChange(true);
+      });
+    }
+
+    [els.yearMin, els.yearMax, els.priceMin, els.priceMax].forEach(function (el) {
+      if (!el) return;
+      el.addEventListener("change", function () {
+        onFilterChange(true);
+      });
+    });
+
+    if (els.search) {
+      els.search.addEventListener("input", function () {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(function () {
+          onFilterChange(true);
+        }, SEARCH_DEBOUNCE_MS);
+      });
+    }
+
+    if (els.reset) {
+      els.reset.addEventListener("click", function (e) {
+        e.preventDefault();
+        resetFilters();
+      });
+    }
+
+    if (els.form) {
+      els.form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        onFilterChange(true);
+      });
+    }
+  }
+
+  function init() {
+    if (!els.grid) {
+      console.error("[used-equipment] #main-list not found");
+      return;
+    }
+
+    if (els.wrapper) {
+      els.empty = els.wrapper.querySelector(".w-dyn-empty");
+      els.pagination = els.wrapper.querySelector(".w-pagination-wrapper");
+    }
+
+    ensureCardTemplate();
+    if (!cardTemplate) return;
+
+    applyFiltersFromUrl();
+    bindEvents();
+    fetchAndRender(readFilters());
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>

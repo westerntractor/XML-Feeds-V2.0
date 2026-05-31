@@ -17,6 +17,10 @@ const {
   publicJobView: publicArchiveJobView,
 } = require("./archiveJobs");
 const { syncFieldsEqual } = require("./fieldMap");
+const {
+  getCatalogMachines,
+  queryUsedEquipment,
+} = require("./usedEquipmentCatalog");
 
 const app = express();
 
@@ -188,6 +192,20 @@ app.get("/collection/inventory", async (req, res) => {
     res.json({ map, fieldsByUniqueId });
   } catch (e) {
     forwardWebflowError(res, e, "Webflow Inventory Fetch Error:");
+  }
+});
+
+/**
+ * GET paginated used equipment for the custom filter UI.
+ * Query: category, make, model, location, yearMin, yearMax, priceMin, priceMax,
+ *        q (search), page (default 1), limit (default 12)
+ */
+app.get("/collection/used-equipment", async (req, res) => {
+  try {
+    const machines = await getCatalogMachines(getAllCollectionItems);
+    res.json(queryUsedEquipment(machines, req.query));
+  } catch (e) {
+    forwardWebflowError(res, e, "Used Equipment Catalog Error:");
   }
 });
 
