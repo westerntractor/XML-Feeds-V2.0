@@ -16,7 +16,11 @@ const {
   startArchiveJob,
   publicJobView: publicArchiveJobView,
 } = require("./archiveJobs");
-const { syncFieldsEqual } = require("./fieldMap");
+const {
+  buildSyncFieldsForUpdate,
+  imagesSyncEqual,
+  nonImageFieldsEqual,
+} = require("./fieldMap");
 const {
   getCatalogMachines,
   queryUsedEquipment,
@@ -324,7 +328,8 @@ app.post("/collection/item/sync", async (req, res) => {
   try {
     if (existingItemId) {
       const prior = existingFields || {};
-      if (syncFieldsEqual(prior, fields)) {
+      const patchFields = buildSyncFieldsForUpdate(prior, fields);
+      if (!patchFields) {
         console.log(`Unchanged: ${fields.name} (${existingItemId})`);
         return res.json({
           id: existingItemId,
@@ -333,9 +338,20 @@ app.post("/collection/item/sync", async (req, res) => {
         });
       }
 
+      const imagesChanged = !imagesSyncEqual(prior, fields);
+      const metaChanged = !nonImageFieldsEqual(prior, fields);
+      const updateKind =
+        imagesChanged && metaChanged
+          ? "metadata+images"
+          : imagesChanged
+            ? "images-only"
+            : "metadata-only";
+
       const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${existingItemId}`;
-      const body = buildItemBody(fields, { isUpdate: true });
-      console.log(`Updating machine: ${fields.name} (${existingItemId})`);
+      const body = buildItemBody(patchFields, { isUpdate: true });
+      console.log(
+        `Updating machine [${updateKind}]: ${fields.name} (${existingItemId})`
+      );
       const result = await webflowRequest(
         () => axios.patch(url, body, webflowConfig),
         { label: `sync-update:${fields["unique-id"]}` }

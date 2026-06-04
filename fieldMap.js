@@ -25,7 +25,7 @@ function secondGalleryFieldSlug() {
   return SECOND_GALLERY_BY_COLLECTION[collectionId] || "image-gallery2-2";
 }
 
-const SYNC_FIELD_KEYS = [
+const NON_IMAGE_SYNC_KEYS = [
   "name",
   "unique-id",
   "advertised-price-amount",
@@ -41,9 +41,12 @@ const SYNC_FIELD_KEYS = [
   "state-province",
   "operationhours",
   "horsepower",
-  "image-gallery-count",
-  "image-first-url",
 ];
+
+/** @deprecated use NON_IMAGE_SYNC_KEYS; kept for callers that import SYNC_FIELD_KEYS */
+const SYNC_FIELD_KEYS = [...NON_IMAGE_SYNC_KEYS, "image-gallery-count", "image-first-url"];
+
+const IMAGE_DATA_KEYS = ["image-gallery", "image1", "image2", "image3", "image4"];
 
 function parseAdvertisedPrice(machine) {
   const ap = machine.advertised_price;
@@ -126,12 +129,7 @@ function buildMachineFields(machine) {
   };
 }
 
-function normalizeSyncFields(fields) {
-  const gallery = fields?.["image-gallery"];
-  const urls = Array.isArray(gallery)
-    ? gallery.map((g) => g?.url).filter(Boolean)
-    : [];
-
+function normalizeNonImageFields(fields) {
   return {
     name: String(fields?.name || "").trim(),
     "unique-id": Number(fields?.["unique-id"]),
@@ -148,22 +146,110 @@ function normalizeSyncFields(fields) {
     "state-province": String(fields?.["state-province"] ?? ""),
     operationhours: Number(fields?.operationhours) || 0,
     horsepower: String(fields?.horsepower ?? "").trim(),
+  };
+}
+
+function galleryUrls(fields) {
+  const gallery = fields?.["image-gallery"];
+  return Array.isArray(gallery)
+    ? gallery.map((g) => g?.url || "").filter(Boolean)
+    : [];
+}
+
+/** Stable fingerprint of all image-bearing CMS fields (incl. Cloudinary URLs). */
+function imageGalleryFingerprint(fields) {
+  if (!fields) return "";
+  const main = galleryUrls(fields).join("\n");
+  const secondSlug = secondGalleryFieldSlug();
+  const second = secondSlug
+    ? (Array.isArray(fields[secondSlug])
+        ? fields[secondSlug].map((g) => g?.url || "").filter(Boolean)
+        : []
+      ).join("\n")
+    : "";
+  const thumbs = IMAGE_DATA_KEYS.filter((k) => k !== "image-gallery")
+    .map((k) => fields[k]?.url || "")
+    .join(",");
+  return `${main}|${second}|${thumbs}`;
+}
+
+function pickImageFieldData(fields) {
+  if (!fields) return {};
+  const out = {};
+  if (fields["image-gallery"]) out["image-gallery"] = fields["image-gallery"];
+  const secondSlug = secondGalleryFieldSlug();
+  if (secondSlug && fields[secondSlug]) out[secondSlug] = fields[secondSlug];
+  for (const key of IMAGE_DATA_KEYS) {
+    if (key !== "image-gallery" && fields[key]) out[key] = fields[key];
+  }
+  return out;
+}
+
+function imagesSyncEqual(existingFieldData, incomingFields) {
+  return (
+    imageGalleryFingerprint(existingFieldData) ===
+    imageGalleryFingerprint(incomingFields)
+  );
+}
+
+function nonImageFieldsEqual(existingFieldData, incomingFields) {
+  const a = normalizeNonImageFields(existingFieldData);
+  const b = normalizeNonImageFields(incomingFields);
+  return NON_IMAGE_SYNC_KEYS.every((key) => a[key] === b[key]);
+}
+
+/**
+ * Build minimal fieldData for a Webflow PATCH.
+ * Returns null when nothing changed.
+ * Omits image fields when only metadata changed (avoids new Cloudinary transforms).
+ */
+function buildSyncFieldsForUpdate(existingFieldData, incomingFields) {
+  const imagesChanged = !imagesSyncEqual(existingFieldData, incomingFields);
+  const nonImageChanged = !nonImageFieldsEqual(existingFieldData, incomingFields);
+
+  if (!imagesChanged && !nonImageChanged) return null;
+
+  const patch = {};
+  if (nonImageChanged) {
+    const normalized = normalizeNonImageFields(incomingFields);
+    for (const key of NON_IMAGE_SYNC_KEYS) {
+      patch[key] = incomingFields[key] ?? normalized[key];
+    }
+  }
+  if (imagesChanged) {
+    Object.assign(patch, pickImageFieldData(incomingFields));
+  }
+  return patch;
+}
+
+function normalizeSyncFields(fields) {
+  const urls = galleryUrls(fields);
+  return {
+    ...normalizeNonImageFields(fields),
     "image-gallery-count": urls.length,
     "image-first-url": urls[0] || "",
   };
 }
 
 function syncFieldsEqual(existingFieldData, incomingFields) {
-  const a = normalizeSyncFields(existingFieldData);
-  const b = normalizeSyncFields(incomingFields);
-  return SYNC_FIELD_KEYS.every((key) => a[key] === b[key]);
+  return (
+    nonImageFieldsEqual(existingFieldData, incomingFields) &&
+    imagesSyncEqual(existingFieldData, incomingFields)
+  );
 }
 
 module.exports = {
   SYNC_FIELD_KEYS,
+  NON_IMAGE_SYNC_KEYS,
+  IMAGE_DATA_KEYS,
   buildMachineFields,
+  buildSyncFieldsForUpdate,
   normalizeSyncFields,
+  normalizeNonImageFields,
+  imagesSyncEqual,
+  nonImageFieldsEqual,
   syncFieldsEqual,
+  pickImageFieldData,
   parseAdvertisedPrice,
   getImageUrls,
   isCloudinaryEnabled,
