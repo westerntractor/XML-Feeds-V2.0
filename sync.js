@@ -13,7 +13,6 @@ const {
   isImageKitEnabled,
   imagesSyncEqual,
   nonImageFieldsEqual,
-  diagnoseImageFields,
 } = require("./fieldMap");
 const {
   isImageSyncDebug,
@@ -141,10 +140,6 @@ async function syncMachineWithRetry(
     imagesEqual,
     metaEqual,
     syncEqual,
-    imageDiagnosis:
-      existingFields && fields && !imagesEqual
-        ? diagnoseImageFields(existingFields, fields)
-        : null,
   });
 
   if (existingItemId && existingFields && syncEqual) {

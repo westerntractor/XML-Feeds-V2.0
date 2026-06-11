@@ -13,6 +13,7 @@
     "start": "node server.js",
     "imagekit:test": "node webkit-test.js",
     "imagekit:migrate-test": "node migrate-imagekit-test.js",
-    "imagekit:migrate-all": "node migrate-imagekit-all.js"
+    "imagekit:migrate-all": "node migrate-imagekit-all.js",
+    "fingerprints:backfill": "node backfill-image-fingerprints.js"
   }
 }

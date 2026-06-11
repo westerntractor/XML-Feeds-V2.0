@@ -7,12 +7,14 @@ const { XMLParser } = require("fast-xml-parser");
 const { webflowRequest } = require("./rateLimit");
 const { getImageUrls, secondGalleryFieldSlug } = require("./fieldMap");
 const {
+  computeImageSourceFingerprint,
+  feedImagesUnchanged,
+  fingerprintFieldSlug,
+} = require("./imageSourceFingerprint");
+const {
   isImageKitEnabled,
   uploadMachineImages,
   mapImageKitFields,
-  buildFilePathsForMachine,
-  cmsHasImageKitGallery,
-  galleryUrlsFromFieldData,
   buildDeliveryUrl,
   GALLERY_WIDTH,
 } = require("./imagekitImages");
@@ -123,16 +125,13 @@ async function resolveImageFieldsForMachine(
     throw new Error("IMAGEKIT_API_KEY and IMAGEKIT_URL_ENDPOINT must be set");
   }
 
-  const canSkipUpload =
-    !forceUpload &&
-    existingFieldData &&
-    cmsHasImageKitGallery(existingFieldData, sourceUrls.length);
+  const filePaths = await uploadMachineImages(uniqueId, sourceUrls, {
+    quiet: !forceUpload,
+  });
 
-  const filePaths = canSkipUpload
-    ? buildFilePathsForMachine(uniqueId, sourceUrls)
-    : await uploadMachineImages(uniqueId, sourceUrls, { quiet: !forceUpload });
-
-  return mapImageKitFields(filePaths, secondGallery);
+  const imageFields = mapImageKitFields(filePaths, secondGallery);
+  imageFields[fingerprintFieldSlug()] = computeImageSourceFingerprint(sourceUrls);
+  return imageFields;
 }
 
 async function patchCmsImages(itemId, imageFields) {
@@ -185,13 +184,10 @@ async function migrateOneMachine(machine, cmsItem, options = {}) {
     return { status: "skipped", reason: "no-cms-item", uniqueId, name };
   }
 
-  if (
-    skipImagekit &&
-    cmsHasImageKitGallery(cmsItem.fieldData, sourceUrls.length)
-  ) {
+  if (skipImagekit && feedImagesUnchanged(cmsItem.fieldData, sourceUrls)) {
     return {
       status: "skipped",
-      reason: "already-imagekit",
+      reason: "fingerprint-match",
       uniqueId,
       name,
       itemId: cmsItem.id,
@@ -234,7 +230,6 @@ module.exports = {
   patchCmsImages,
   publishCmsItems,
   migrateOneMachine,
-  galleryUrls: galleryUrlsFromFieldData,
   buildDeliveryUrl,
   GALLERY_WIDTH,
 };
