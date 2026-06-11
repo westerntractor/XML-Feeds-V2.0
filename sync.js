@@ -11,7 +11,18 @@ const {
   buildMachineFieldsAsync,
   syncFieldsEqual,
   isImageKitEnabled,
+  imagesSyncEqual,
+  nonImageFieldsEqual,
+  diagnoseImageFields,
 } = require("./fieldMap");
+const {
+  isImageSyncDebug,
+  log: debugLog,
+  logEnvSnapshot,
+  logInventorySummary,
+  logMachineLookup,
+  logSyncDecision,
+} = require("./imageSyncDebug");
 
 const HEROKU_URL =
   process.env.HEROKU_APP_URL ||
@@ -33,7 +44,24 @@ const webflowConfig = {
 
 function parseInventoryResponse(data) {
   if (data?.map) {
-    return { map: data.map, fieldsByUniqueId: data.fieldsByUniqueId || {} };
+    const fieldsByUniqueId = data.fieldsByUniqueId || {};
+    if (isImageSyncDebug()) {
+      debugLog("parseInventory", "wrapped inventory response", {
+        hasFieldsByUniqueId: Boolean(data.fieldsByUniqueId),
+        fieldsByUniqueIdCount: Object.keys(fieldsByUniqueId).length,
+        mapCount: Object.keys(data.map || {}).length,
+      });
+    }
+    return { map: data.map, fieldsByUniqueId };
+  }
+  if (isImageSyncDebug()) {
+    debugLog(
+      "parseInventory",
+      "LEGACY inventory shape — fieldsByUniqueId will be EMPTY (causes re-upload)",
+      {
+        topLevelKeys: Object.keys(data || {}).slice(0, 5),
+      }
+    );
   }
   return { map: data, fieldsByUniqueId: {} };
 }
@@ -90,9 +118,36 @@ async function syncMachineWithRetry(
   const existingItemId =
     inventory[machineId] || inventory[parseInt(machineId, 10)];
   const existingFields = fieldsByUniqueId[machineId];
+
+  logMachineLookup(machineId, inventory, fieldsByUniqueId);
+
   const fields = await buildMachineFieldsAsync(machine, existingFields);
 
-  if (existingItemId && existingFields && syncFieldsEqual(existingFields, fields)) {
+  const imagesEqual =
+    existingFields && fields
+      ? imagesSyncEqual(existingFields, fields)
+      : false;
+  const metaEqual =
+    existingFields && fields
+      ? nonImageFieldsEqual(existingFields, fields)
+      : false;
+  const syncEqual =
+    existingItemId && existingFields
+      ? syncFieldsEqual(existingFields, fields)
+      : false;
+
+  logSyncDecision(machineId, fields.name, {
+    hasExistingFields: Boolean(existingFields),
+    imagesEqual,
+    metaEqual,
+    syncEqual,
+    imageDiagnosis:
+      existingFields && fields && !imagesEqual
+        ? diagnoseImageFields(existingFields, fields)
+        : null,
+  });
+
+  if (existingItemId && existingFields && syncEqual) {
     stats.unchanged++;
     return;
   }
@@ -305,6 +360,10 @@ function logImageKitStatus() {
   } else {
     console.log("ImageKit: disabled — using raw feed image URLs");
   }
+  if (isImageSyncDebug()) {
+    console.log("IMAGE_SYNC_DEBUG: ON — verbose image sync logging enabled");
+    logEnvSnapshot("sync-start");
+  }
 }
 
 async function runSyncUniqueIds(uniqueIds) {
@@ -396,6 +455,7 @@ async function runSync() {
   const { map: inventory, fieldsByUniqueId } = parseInventoryResponse(
     invRes.data
   );
+  logInventorySummary(fieldsByUniqueId, inventory);
 
   const machines = await fetchFeedMachines();
   const incomingUniqueIds = machines

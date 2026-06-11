@@ -20,7 +20,15 @@ const {
   buildSyncFieldsForUpdate,
   imagesSyncEqual,
   nonImageFieldsEqual,
+  diagnoseImageFields,
 } = require("./fieldMap");
+const {
+  isImageSyncDebug,
+  log: debugLog,
+  logEnvSnapshot,
+  logInventorySummary,
+  logServerPatch,
+} = require("./imageSyncDebug");
 const {
   getCatalogMachines,
   queryUsedEquipment,
@@ -193,6 +201,9 @@ app.get("/collection/inventory", async (req, res) => {
   try {
     const items = await getAllCollectionItems();
     const { map, fieldsByUniqueId } = buildInventoryData(items);
+    if (isImageSyncDebug()) {
+      logInventorySummary(fieldsByUniqueId, map);
+    }
     res.json({ map, fieldsByUniqueId });
   } catch (e) {
     forwardWebflowError(res, e, "Webflow Inventory Fetch Error:");
@@ -347,6 +358,16 @@ app.post("/collection/item/sync", async (req, res) => {
             ? "images-only"
             : "metadata-only";
 
+      logServerPatch(fields["unique-id"], fields.name, existingItemId, {
+        imagesChanged,
+        metaChanged,
+        updateKind,
+        patchKeys: Object.keys(patchFields),
+        imageDiagnosis: imagesChanged
+          ? diagnoseImageFields(prior, fields)
+          : null,
+      });
+
       const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${existingItemId}`;
       const body = buildItemBody(patchFields, { isUpdate: true });
       console.log(
@@ -446,4 +467,8 @@ app.post("/site/publish", async (req, res) => {
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
+  if (isImageSyncDebug()) {
+    console.log("IMAGE_SYNC_DEBUG: ON — verbose image sync logging enabled");
+    logEnvSnapshot("server-start");
+  }
 });

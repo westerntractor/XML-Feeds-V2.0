@@ -6,7 +6,15 @@ const {
   buildFilePathsForMachine,
   cmsHasImageKitGallery,
   uploadMachineImages,
+  galleryUrlsFromFieldData,
 } = require("./imagekitImages");
+const {
+  isImageSyncDebug,
+  log: debugLog,
+  diagnoseCmsImageKitGallery,
+  diagnoseImageFields,
+  logBuildMachineFieldsResult,
+} = require("./imageSyncDebug");
 
 const MAX_IMAGES_PER_MACHINE = parseInt(
   process.env.IMAGEKIT_MAX_IMAGES_PER_MACHINE ||
@@ -142,23 +150,60 @@ async function buildMachineFieldsAsync(machine, existingFieldData = null) {
   const base = buildMachineFieldsBase(machine);
   const sourceUrls = getImageUrls(machine);
 
-  if (!sourceUrls.length) return base;
+  if (!sourceUrls.length) {
+    if (isImageSyncDebug()) {
+      debugLog("buildMachineFields", `unique-id=${machine.id} no feed images`);
+    }
+    return base;
+  }
 
   if (!isImageKitEnabled()) {
+    if (isImageSyncDebug()) {
+      debugLog(
+        "buildMachineFields",
+        `unique-id=${machine.id} ImageKit disabled — raw feed URLs`
+      );
+    }
     return { ...base, ...mapImagesRaw(sourceUrls) };
   }
 
   const uniqueId = String(machine.id);
   const secondGallery = secondGalleryFieldSlug();
+  const cmsDiagnosis = diagnoseCmsImageKitGallery(
+    existingFieldData,
+    sourceUrls.length
+  );
   const canSkip =
     existingFieldData &&
     cmsHasImageKitGallery(existingFieldData, sourceUrls.length);
 
+  if (isImageSyncDebug() && !canSkip) {
+    debugLog(
+      "buildMachineFields",
+      `unique-id=${uniqueId} will UPLOAD to ImageKit`,
+      cmsDiagnosis
+    );
+  }
+
   const filePaths = canSkip
     ? buildFilePathsForMachine(uniqueId, sourceUrls)
-    : await uploadMachineImages(uniqueId, sourceUrls, { quiet: true });
+    : await uploadMachineImages(uniqueId, sourceUrls, {
+        quiet: !isImageSyncDebug(),
+      });
 
-  return { ...base, ...mapImageKitFields(filePaths, secondGallery) };
+  const imageFields = mapImageKitFields(filePaths, secondGallery);
+
+  logBuildMachineFieldsResult(uniqueId, {
+    sourceCount: sourceUrls.length,
+    cmsDiagnosis,
+    canSkipUpload: canSkip,
+    didUpload: !canSkip,
+    sampleExistingUrl: galleryUrlsFromFieldData(existingFieldData)[0] || null,
+    sampleIncomingUrl: imageFields["image-gallery"]?.[0]?.url || null,
+    sampleRebuiltPath: filePaths[0] || null,
+  });
+
+  return { ...base, ...imageFields };
 }
 
 function normalizeNonImageFields(fields) {
@@ -217,16 +262,34 @@ function pickImageFieldData(fields) {
 }
 
 function imagesSyncEqual(existingFieldData, incomingFields) {
-  return (
+  const equal =
     imageGalleryFingerprint(existingFieldData) ===
-    imageGalleryFingerprint(incomingFields)
-  );
+    imageGalleryFingerprint(incomingFields);
+  if (isImageSyncDebug() && !equal) {
+    debugLog(
+      "imagesSyncEqual",
+      `unique-id=${incomingFields?.["unique-id"] ?? existingFieldData?.["unique-id"]} images differ`,
+      diagnoseImageFields(existingFieldData, incomingFields)
+    );
+  }
+  return equal;
 }
 
 function nonImageFieldsEqual(existingFieldData, incomingFields) {
   const a = normalizeNonImageFields(existingFieldData);
   const b = normalizeNonImageFields(incomingFields);
-  return NON_IMAGE_SYNC_KEYS.every((key) => a[key] === b[key]);
+  const equal = NON_IMAGE_SYNC_KEYS.every((key) => a[key] === b[key]);
+  if (isImageSyncDebug() && !equal) {
+    const changed = NON_IMAGE_SYNC_KEYS.filter((key) => a[key] !== b[key]).map(
+      (key) => ({ key, existing: a[key], incoming: b[key] })
+    );
+    debugLog(
+      "nonImageFieldsEqual",
+      `unique-id=${incomingFields?.["unique-id"] ?? existingFieldData?.["unique-id"]} metadata differs`,
+      changed
+    );
+  }
+  return equal;
 }
 
 /**
@@ -293,4 +356,5 @@ module.exports = {
   secondGalleryFieldSlug,
   isImageKitEnabled,
   imageProviderLabel,
+  diagnoseImageFields,
 };
