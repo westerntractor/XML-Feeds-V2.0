@@ -8,9 +8,9 @@ const {
   SITE_PUBLISH_COOLDOWN_MS,
 } = require("./rateLimit");
 const {
-  buildMachineFields,
+  buildMachineFieldsAsync,
   syncFieldsEqual,
-  isCloudinaryEnabled,
+  isImageKitEnabled,
 } = require("./fieldMap");
 
 const HEROKU_URL =
@@ -87,10 +87,10 @@ async function syncMachineWithRetry(
   const machineId = machine.id?.toString();
   if (!machineId) return;
 
-  const fields = buildMachineFields(machine);
   const existingItemId =
     inventory[machineId] || inventory[parseInt(machineId, 10)];
   const existingFields = fieldsByUniqueId[machineId];
+  const fields = await buildMachineFieldsAsync(machine, existingFields);
 
   if (existingItemId && existingFields && syncFieldsEqual(existingFields, fields)) {
     stats.unchanged++;
@@ -297,19 +297,19 @@ async function runPublishAll() {
 /** John Deere 9570RX — three distinct feed listings */
 const JD_9570RX_UNIQUE_IDS = ["10979598", "11409593", "11500214"];
 
-function logCloudinaryStatus() {
-  if (isCloudinaryEnabled()) {
+function logImageKitStatus() {
+  if (isImageKitEnabled()) {
     console.log(
-      `Cloudinary: enabled (gallery w=${process.env.CLOUDINARY_GALLERY_WIDTH || 1600}, thumb w=${process.env.CLOUDINARY_THUMB_WIDTH || 800}, signed fetch)`
+      `ImageKit: enabled (gallery w=${process.env.IMAGEKIT_GALLERY_WIDTH || 1600}, thumb w=${process.env.IMAGEKIT_THUMB_WIDTH || 800}, q=${process.env.IMAGEKIT_QUALITY || 90})`
     );
   } else {
-    console.log("Cloudinary: disabled — using raw feed image URLs");
+    console.log("ImageKit: disabled — using raw feed image URLs");
   }
 }
 
 async function runSyncUniqueIds(uniqueIds) {
   console.log(`Sync-ids (${uniqueIds.length}): ${uniqueIds.join(", ")}`);
-  logCloudinaryStatus();
+  logImageKitStatus();
   console.log(
     `Throttle: ${MIN_INTERVAL_MS}ms (~${process.env.WEBFLOW_RATE_LIMIT_PER_MINUTE || 120}/min)`
   );
@@ -343,11 +343,6 @@ async function runSyncUniqueIds(uniqueIds) {
   const stats = { created: 0, updated: 0, unchanged: 0, failed: 0 };
 
   for (const machine of machines) {
-    const fields = buildMachineFields(machine);
-    const sampleUrl = fields["image-gallery"]?.[0]?.url || "";
-    console.log(
-      `Feed ${machine.id}: price=${fields["advertised-price-amount"]}, images=${fields["image-gallery"]?.length || 0}, via=${sampleUrl.includes("res.cloudinary.com") ? "cloudinary" : "direct"}`
-    );
     await syncMachineWithRetry(
       machine,
       inventory,
@@ -389,7 +384,7 @@ async function runSyncUniqueIds(uniqueIds) {
 
 async function runSync() {
   console.log("Starting sync process...");
-  logCloudinaryStatus();
+  logImageKitStatus();
   console.log(
     `Throttle: ${MIN_INTERVAL_MS}ms (~${process.env.WEBFLOW_RATE_LIMIT_PER_MINUTE || 120}/min), publish chunks: ${PUBLISH_CHUNK_SIZE}`
   );

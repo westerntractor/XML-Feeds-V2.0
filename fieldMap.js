@@ -1,14 +1,17 @@
 /** MachineFinder XML → Webflow CMS fieldData mapping */
 
 const {
-  isCloudinaryEnabled,
-  optimizeImageUrl,
-  GALLERY_WIDTH,
-  THUMB_WIDTH,
-} = require("./cloudinaryImages");
+  isImageKitEnabled,
+  mapImageKitFields,
+  buildFilePathsForMachine,
+  cmsHasImageKitGallery,
+  uploadMachineImages,
+} = require("./imagekitImages");
 
 const MAX_IMAGES_PER_MACHINE = parseInt(
-  process.env.CLOUDINARY_MAX_IMAGES_PER_MACHINE || "30",
+  process.env.IMAGEKIT_MAX_IMAGES_PER_MACHINE ||
+    process.env.CLOUDINARY_MAX_IMAGES_PER_MACHINE ||
+    "30",
   10
 );
 
@@ -73,41 +76,29 @@ function getImageUrls(machine) {
     (a, b) => (b.primary === "true" ? 1 : 0) - (a.primary === "true" ? 1 : 0)
   );
   const urls = sorted
-    .map((img) => img.filePointer || img.filePointerLarge)
+    .map((img) => img.filePointerLarge || img.filePointer)
     .filter(Boolean);
   return urls.slice(0, MAX_IMAGES_PER_MACHINE);
 }
 
-function toWebflowImage(sourceUrl, role = "gallery") {
-  const width = role === "thumb" ? THUMB_WIDTH : GALLERY_WIDTH;
-  const url = optimizeImageUrl(sourceUrl, { width });
-  return { url, alt: null };
-}
-
-function mapImages(urls) {
+function mapImagesRaw(urls) {
   if (!urls.length) return {};
-  const gallery = urls.map((u) => toWebflowImage(u, "gallery"));
+  const toImage = (url) => ({ url, alt: null });
+  const gallery = urls.map((u) => toImage(u));
   const out = { "image-gallery": gallery };
   const secondGallery = secondGalleryFieldSlug();
   if (secondGallery) out[secondGallery] = gallery;
-  if (urls[0]) out.image1 = toWebflowImage(urls[0], "thumb");
-  if (urls[1]) out.image2 = toWebflowImage(urls[1], "thumb");
-  if (urls[2]) out.image3 = toWebflowImage(urls[2], "thumb");
-  if (urls[3]) out.image4 = toWebflowImage(urls[3], "thumb");
+  if (urls[0]) out.image1 = toImage(urls[0]);
+  if (urls[1]) out.image2 = toImage(urls[1]);
+  if (urls[2]) out.image3 = toImage(urls[2]);
+  if (urls[3]) out.image4 = toImage(urls[3]);
   return out;
 }
 
-function categoryText(category) {
-  const s = String(category ?? "").trim();
-  if (!s) return "";
-  return s.replace(/s$/i, "");
-}
-
-function buildMachineFields(machine) {
+function buildMachineFieldsBase(machine) {
   const machineId = machine.id?.toString();
   const name = `${machine.manufacturer || ""} ${machine.model || ""}`.trim();
   const { amount, currency } = parseAdvertisedPrice(machine);
-  const imageUrls = getImageUrls(machine);
 
   return {
     name,
@@ -125,8 +116,49 @@ function buildMachineFields(machine) {
     "state-province": String(machine.state_province ?? ""),
     operationhours: parseFloat(machine.operationHours || 0) || 0,
     horsepower: String(machine.horsePower ?? "").trim(),
-    ...mapImages(imageUrls),
   };
+}
+
+function categoryText(category) {
+  const s = String(category ?? "").trim();
+  if (!s) return "";
+  return s.replace(/s$/i, "");
+}
+
+/** Sync fields with raw feed image URLs (no ImageKit). Used in tests. */
+function buildMachineFields(machine) {
+  const imageUrls = getImageUrls(machine);
+  return {
+    ...buildMachineFieldsBase(machine),
+    ...mapImagesRaw(imageUrls),
+  };
+}
+
+/**
+ * Build full CMS fields including ImageKit upload when needed.
+ * Skips re-upload when CMS already has matching ImageKit gallery.
+ */
+async function buildMachineFieldsAsync(machine, existingFieldData = null) {
+  const base = buildMachineFieldsBase(machine);
+  const sourceUrls = getImageUrls(machine);
+
+  if (!sourceUrls.length) return base;
+
+  if (!isImageKitEnabled()) {
+    return { ...base, ...mapImagesRaw(sourceUrls) };
+  }
+
+  const uniqueId = String(machine.id);
+  const secondGallery = secondGalleryFieldSlug();
+  const canSkip =
+    existingFieldData &&
+    cmsHasImageKitGallery(existingFieldData, sourceUrls.length);
+
+  const filePaths = canSkip
+    ? buildFilePathsForMachine(uniqueId, sourceUrls)
+    : await uploadMachineImages(uniqueId, sourceUrls, { quiet: true });
+
+  return { ...base, ...mapImageKitFields(filePaths, secondGallery) };
 }
 
 function normalizeNonImageFields(fields) {
@@ -156,7 +188,6 @@ function galleryUrls(fields) {
     : [];
 }
 
-/** Stable fingerprint of all image-bearing CMS fields (incl. Cloudinary URLs). */
 function imageGalleryFingerprint(fields) {
   if (!fields) return "";
   const main = galleryUrls(fields).join("\n");
@@ -201,7 +232,7 @@ function nonImageFieldsEqual(existingFieldData, incomingFields) {
 /**
  * Build minimal fieldData for a Webflow PATCH.
  * Returns null when nothing changed.
- * Omits image fields when only metadata changed (avoids new Cloudinary transforms).
+ * Omits image fields when only metadata changed.
  */
 function buildSyncFieldsForUpdate(existingFieldData, incomingFields) {
   const imagesChanged = !imagesSyncEqual(existingFieldData, incomingFields);
@@ -238,11 +269,18 @@ function syncFieldsEqual(existingFieldData, incomingFields) {
   );
 }
 
+function imageProviderLabel(sampleUrl) {
+  if (!sampleUrl) return "none";
+  if (sampleUrl.includes("ik.imagekit.io")) return "imagekit";
+  return "direct";
+}
+
 module.exports = {
   SYNC_FIELD_KEYS,
   NON_IMAGE_SYNC_KEYS,
   IMAGE_DATA_KEYS,
   buildMachineFields,
+  buildMachineFieldsAsync,
   buildSyncFieldsForUpdate,
   normalizeSyncFields,
   normalizeNonImageFields,
@@ -252,5 +290,7 @@ module.exports = {
   pickImageFieldData,
   parseAdvertisedPrice,
   getImageUrls,
-  isCloudinaryEnabled,
+  secondGalleryFieldSlug,
+  isImageKitEnabled,
+  imageProviderLabel,
 };

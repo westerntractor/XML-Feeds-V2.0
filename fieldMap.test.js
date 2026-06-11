@@ -34,12 +34,12 @@ test.strictEqual(
   "price differs => non-image not equal"
 );
 
-const patch = buildSyncFieldsForUpdate(existing, fields, machine);
+const patch = buildSyncFieldsForUpdate(existing, fields);
 test.ok(patch);
 test.strictEqual(patch["advertised-price-amount"], 350000);
 test.strictEqual(patch["image-gallery"], undefined, "must not include gallery when only price changed");
 
-const unchanged = buildSyncFieldsForUpdate(fields, fields, machine);
+const unchanged = buildSyncFieldsForUpdate(fields, fields);
 test.strictEqual(unchanged, null);
 test.ok(syncFieldsEqual(fields, fields));
 
