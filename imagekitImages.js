@@ -4,6 +4,24 @@ const GALLERY_WIDTH = parseInt(process.env.IMAGEKIT_GALLERY_WIDTH || "1600", 10)
 const THUMB_WIDTH = parseInt(process.env.IMAGEKIT_THUMB_WIDTH || "800", 10);
 const QUALITY = parseInt(process.env.IMAGEKIT_QUALITY || "90", 10);
 
+/** Webflow multi-image field limit (per field). */
+const WEBFLOW_GALLERY_MAX = parseInt(process.env.WEBFLOW_GALLERY_MAX || "25", 10);
+/** Max feed images synced across image-gallery + second gallery (25 + 25). */
+const MAX_IMAGES_CAP = WEBFLOW_GALLERY_MAX * 2;
+
+/**
+ * Split ordered images for Webflow: primary gallery + overflow second gallery.
+ * @param {unknown[]} items
+ * @returns {{ primary: unknown[], overflow: unknown[] }}
+ */
+function splitForWebflowGalleries(items) {
+  const list = Array.isArray(items) ? items : [];
+  return {
+    primary: list.slice(0, WEBFLOW_GALLERY_MAX),
+    overflow: list.slice(WEBFLOW_GALLERY_MAX, MAX_IMAGES_CAP),
+  };
+}
+
 function isImageKitEnabled() {
   return Boolean(
     process.env.IMAGEKIT_API_KEY && process.env.IMAGEKIT_URL_ENDPOINT
@@ -152,9 +170,13 @@ async function uploadMachineImages(uniqueId, sourceUrls, { quiet = false } = {})
 
 function mapImageKitFields(filePaths, secondGalleryFieldSlug) {
   if (!filePaths.length) return {};
-  const gallery = filePaths.map((fp) => toWebflowImage(fp, "gallery"));
-  const out = { "image-gallery": gallery };
-  if (secondGalleryFieldSlug) out[secondGalleryFieldSlug] = gallery;
+  const { primary, overflow } = splitForWebflowGalleries(filePaths);
+  const out = {
+    "image-gallery": primary.map((fp) => toWebflowImage(fp, "gallery")),
+  };
+  if (secondGalleryFieldSlug) {
+    out[secondGalleryFieldSlug] = overflow.map((fp) => toWebflowImage(fp, "gallery"));
+  }
   if (filePaths[0]) out.image1 = toWebflowImage(filePaths[0], "thumb");
   if (filePaths[1]) out.image2 = toWebflowImage(filePaths[1], "thumb");
   if (filePaths[2]) out.image3 = toWebflowImage(filePaths[2], "thumb");
@@ -170,11 +192,14 @@ module.exports = {
   uploadFromUrl,
   uploadMachineImages,
   mapImageKitFields,
+  splitForWebflowGalleries,
   toWebflowImage,
   buildFilePathsForMachine,
   cmsHasImageKitGallery,
   isImageKitCmsUrl,
   galleryUrlsFromFieldData,
+  WEBFLOW_GALLERY_MAX,
+  MAX_IMAGES_CAP,
   GALLERY_WIDTH,
   THUMB_WIDTH,
   QUALITY,

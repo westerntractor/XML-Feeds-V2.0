@@ -6,6 +6,8 @@ const {
   nonImageFieldsEqual,
   syncFieldsEqual,
   getImageUrls,
+  cmsGalleryLayoutMatches,
+  expectedGalleryCounts,
 } = require("./fieldMap");
 const {
   computeImageSourceFingerprint,
@@ -83,6 +85,31 @@ test.ok(
 test.ok(
   syncFieldsEqual(existingWebflow, incomingSkip),
   "unchanged when fingerprint matches even if CMS URLs differ"
+);
+
+const manyUrls = Array.from({ length: 32 }, (_, i) => `https://cdn.example.com/img-${i}.jpg`);
+const splitFields = buildMachineFields({
+  ...machine,
+  images: { image: manyUrls.map((url, i) => ({ filePointer: url, primary: i === 0 ? "true" : undefined })) },
+});
+test.strictEqual(splitFields["image-gallery"].length, 25);
+test.strictEqual(splitFields["image-gallery2-2"].length, 7);
+
+const counts = expectedGalleryCounts(32);
+test.strictEqual(counts.primary, 25);
+test.strictEqual(counts.overflow, 7);
+
+const legacyDupCms = {
+  "image-gallery": Array.from({ length: 25 }, (_, i) => ({ url: `https://cdn.prod.website-files.com/a-${i}.jpg`, alt: null })),
+  "image-gallery2-2": Array.from({ length: 25 }, (_, i) => ({ url: `https://cdn.prod.website-files.com/a-${i}.jpg`, alt: null })),
+  [slug]: computeImageSourceFingerprint(manyUrls),
+};
+test.ok(!cmsGalleryLayoutMatches(legacyDupCms, manyUrls), "legacy duplicate galleries fail layout check");
+
+const fixedIncoming = { ...splitFields };
+test.ok(
+  !imagesSyncEqual(legacyDupCms, fixedIncoming),
+  "fingerprint match but wrong layout => images not equal"
 );
 
 console.log("fieldMap tests passed");

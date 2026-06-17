@@ -176,7 +176,7 @@ function logEnvSnapshot(section = "env") {
     IMAGEKIT_MAX_IMAGES:
       process.env.IMAGEKIT_MAX_IMAGES_PER_MACHINE ||
       process.env.CLOUDINARY_MAX_IMAGES_PER_MACHINE ||
-      "30",
+      "50",
     IMAGEKIT_ENABLED: Boolean(
       process.env.IMAGEKIT_API_KEY && process.env.IMAGEKIT_URL_ENDPOINT
     ),

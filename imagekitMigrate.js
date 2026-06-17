@@ -5,7 +5,7 @@
 const axios = require("axios");
 const { XMLParser } = require("fast-xml-parser");
 const { webflowRequest } = require("./rateLimit");
-const { getImageUrls, secondGalleryFieldSlug } = require("./fieldMap");
+const { getImageUrls, secondGalleryFieldSlug, cmsGalleryLayoutMatches } = require("./fieldMap");
 const {
   computeImageSourceFingerprint,
   feedImagesUnchanged,
@@ -184,7 +184,11 @@ async function migrateOneMachine(machine, cmsItem, options = {}) {
     return { status: "skipped", reason: "no-cms-item", uniqueId, name };
   }
 
-  if (skipImagekit && feedImagesUnchanged(cmsItem.fieldData, sourceUrls)) {
+  if (
+    skipImagekit &&
+    feedImagesUnchanged(cmsItem.fieldData, sourceUrls) &&
+    cmsGalleryLayoutMatches(cmsItem.fieldData, sourceUrls)
+  ) {
     return {
       status: "skipped",
       reason: "fingerprint-match",
