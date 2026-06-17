@@ -20,7 +20,6 @@ const {
   buildSyncFieldsForUpdate,
   imagesSyncEqual,
   nonImageFieldsEqual,
-  diagnoseImageFields,
 } = require("./fieldMap");
 const {
   isImageSyncDebug,
@@ -28,6 +27,7 @@ const {
   logEnvSnapshot,
   logInventorySummary,
   logServerPatch,
+  diagnoseImageFields,
 } = require("./imageSyncDebug");
 const {
   getCatalogMachines,
