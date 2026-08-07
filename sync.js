@@ -350,7 +350,7 @@ const JD_9570RX_UNIQUE_IDS = ["10979598", "11409593", "11500214"];
 function logImageKitStatus() {
   if (isImageKitEnabled()) {
     console.log(
-      `ImageKit: enabled (gallery w=${process.env.IMAGEKIT_GALLERY_WIDTH || 1600}, thumb w=${process.env.IMAGEKIT_THUMB_WIDTH || 800}, q=${process.env.IMAGEKIT_QUALITY || 90})`
+      `ImageKit: enabled (gallery w=${process.env.IMAGEKIT_GALLERY_WIDTH || 1200}, thumb w=${process.env.IMAGEKIT_THUMB_WIDTH || 800}, q=${process.env.IMAGEKIT_QUALITY || 60}, f-${process.env.IMAGEKIT_FORMAT || "avif"})`
     );
   } else {
     console.log("ImageKit: disabled — using raw feed image URLs");

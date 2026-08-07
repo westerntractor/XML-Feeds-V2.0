@@ -1,19 +1,29 @@
 /**
- * Bulk ImageKit migration — all active feed machines with CMS keepers.
+ * Backfill CMS image fields to current ImageKit delivery settings
+ * (default: w-1200, q-60, f-avif) without re-uploading to ImageKit.
+ *
+ * Pause scheduled sync first. Fingerprint-matched machines are still rewritten.
  *
  * Usage (load site env first):
- *   node migrate-imagekit-all.js --dry-run
- *   node migrate-imagekit-all.js --limit 5
- *   node migrate-imagekit-all.js --skip-imagekit
- *   node migrate-imagekit-all.js
- *   node migrate-imagekit-all.js --publish
+ *   node backfill-cms-avif.js --dry-run
+ *   node backfill-cms-avif.js --limit 5
+ *   node backfill-cms-avif.js 11097515
+ *   node backfill-cms-avif.js
+ *   node backfill-cms-avif.js --publish
+ *   node backfill-cms-avif.js --force-upload   # re-upload from feed, then PATCH
  *
- * WS:  $env:DOTENV_CONFIG_PATH="ws.env"; node migrate-imagekit-all.js
- * WT:  $env:DOTENV_CONFIG_PATH="wt.env"; node migrate-imagekit-all.js
+ * WS:  $env:DOTENV_CONFIG_PATH="ws.env"; node backfill-cms-avif.js
+ * WT:  $env:DOTENV_CONFIG_PATH="wt.env"; node backfill-cms-avif.js
  */
 
 require("dotenv/config");
-const { isImageKitEnabled } = require("./imagekitImages");
+const {
+  isImageKitEnabled,
+  GALLERY_WIDTH,
+  THUMB_WIDTH,
+  QUALITY,
+  FORMAT,
+} = require("./imagekitImages");
 const {
   fetchFeedMachines,
   getAllCollectionItems,
@@ -24,6 +34,7 @@ const {
 
 function parseArgs(argv) {
   const flags = new Set(argv.filter((a) => a.startsWith("--")));
+  const positionals = argv.filter((a) => !a.startsWith("--"));
   let limit = null;
   for (const arg of argv) {
     const m = arg.match(/^--limit=(\d+)$/);
@@ -35,28 +46,40 @@ function parseArgs(argv) {
   }
 
   return {
+    identifier: positionals[0] || null,
     dryRun: flags.has("--dry-run"),
     publish: flags.has("--publish"),
-    skipImagekit: flags.has("--skip-imagekit"),
     forceUpload: flags.has("--force-upload"),
-    forceRewrite: flags.has("--force-rewrite"),
     limit: Number.isFinite(limit) ? limit : null,
   };
 }
 
-async function main() {
-  const { dryRun, publish, skipImagekit, forceUpload, forceRewrite, limit } =
-    parseArgs(process.argv.slice(2));
+function machineStockNumber(machine) {
+  return String(machine.stockNumber ?? machine.stocknumber ?? "").trim();
+}
 
-  console.log("ImageKit bulk migration");
+function matchesMachineIdentifier(machine, identifier) {
+  const key = String(identifier).trim();
+  if (!key) return false;
+  return String(machine.id) === key || machineStockNumber(machine) === key;
+}
+
+async function main() {
+  const { identifier, dryRun, publish, forceUpload, limit } = parseArgs(
+    process.argv.slice(2)
+  );
+
+  console.log("CMS AVIF / transform URL backfill");
   console.log("  collection:", process.env.COLLECTION_ID);
   console.log("  ik folder: ", process.env.IMAGEKIT_UPLOAD_FOLDER);
   console.log("  endpoint:  ", process.env.IMAGEKIT_URL_ENDPOINT);
+  console.log(
+    `  transforms: w-gallery=${GALLERY_WIDTH}, w-thumb=${THUMB_WIDTH}, q=${QUALITY}, f-${FORMAT}`
+  );
+  console.log("  mode:      ", forceUpload ? "re-upload + PATCH" : "rewrite URLs only (no upload)");
   console.log("  dry-run:   ", dryRun);
-  console.log("  skip-ik:   ", skipImagekit);
-  console.log("  force:     ", forceUpload);
-  console.log("  rewrite:   ", forceRewrite);
   console.log("  publish:   ", publish);
+  if (identifier) console.log("  machine:   ", identifier);
   if (limit) console.log("  limit:     ", limit);
 
   if (!isImageKitEnabled()) {
@@ -73,18 +96,22 @@ async function main() {
 
   const keeperMap = buildKeeperMap(items);
   let queue = machines.filter((m) => keeperMap.has(String(m.id)));
+
+  if (identifier) {
+    queue = queue.filter((m) => matchesMachineIdentifier(m, identifier));
+    if (!queue.length) {
+      throw new Error(
+        `No feed+CMS match for ${identifier} (unique-id or stock number)`
+      );
+    }
+  }
   if (limit) queue = queue.slice(0, limit);
 
   console.log(`\nFeed machines: ${machines.length}`);
   console.log(`CMS keepers:   ${keeperMap.size}`);
   console.log(`To process:    ${queue.length}`);
 
-  const stats = {
-    migrated: 0,
-    skipped: 0,
-    failed: 0,
-    published: 0,
-  };
+  const stats = { migrated: 0, skipped: 0, failed: 0 };
   const migratedItemIds = [];
   const failures = [];
 
@@ -97,9 +124,8 @@ async function main() {
     try {
       const result = await migrateOneMachine(machine, cmsItem, {
         dryRun,
-        skipImagekit,
         forceUpload,
-        forceRewrite,
+        forceRewrite: true,
       });
 
       if (result.status === "migrated" || result.status === "dry-run") {
@@ -108,6 +134,7 @@ async function main() {
         console.log(
           `${label} ${result.name} — ${result.status} (${result.imageCount} images)`
         );
+        if (result.sampleUrl) console.log(`    sample: ${result.sampleUrl}`);
       } else {
         stats.skipped++;
         console.log(`${label} — skipped (${result.reason})`);
@@ -137,13 +164,15 @@ async function main() {
   } else if (publish && dryRun) {
     console.log("\n--publish ignored during --dry-run");
   } else if (!dryRun) {
-    console.log("\nCMS updated. Add --publish to publish items, or publish from Webflow.");
+    console.log(
+      "\nCMS updated. Add --publish to publish items, or publish from Webflow."
+    );
   }
 }
 
 if (require.main === module) {
   main().catch((err) => {
-    console.error("\nBulk migration failed:", err.message || err);
+    console.error("\nBackfill failed:", err.message || err);
     process.exit(1);
   });
 }

@@ -16,7 +16,11 @@ const {
   uploadMachineImages,
   mapImageKitFields,
   buildDeliveryUrl,
+  buildFilePathsForMachine,
   GALLERY_WIDTH,
+  THUMB_WIDTH,
+  QUALITY,
+  FORMAT,
 } = require("./imagekitImages");
 
 function webflowConfig() {
@@ -113,7 +117,7 @@ function buildKeeperMap(items) {
 async function resolveImageFieldsForMachine(
   machine,
   existingFieldData = null,
-  { forceUpload = false } = {}
+  { forceUpload = false, skipUpload = false } = {}
 ) {
   const sourceUrls = getImageUrls(machine);
   if (!sourceUrls.length) return {};
@@ -125,9 +129,14 @@ async function resolveImageFieldsForMachine(
     throw new Error("IMAGEKIT_API_KEY and IMAGEKIT_URL_ENDPOINT must be set");
   }
 
-  const filePaths = await uploadMachineImages(uniqueId, sourceUrls, {
-    quiet: !forceUpload,
-  });
+  // skipUpload: rebuild CMS delivery URLs from expected ImageKit paths (no upload).
+  // forceUpload: always re-upload from feed even if skipUpload was requested.
+  const filePaths =
+    skipUpload && !forceUpload
+      ? buildFilePathsForMachine(uniqueId, sourceUrls)
+      : await uploadMachineImages(uniqueId, sourceUrls, {
+          quiet: !forceUpload,
+        });
 
   const imageFields = mapImageKitFields(filePaths, secondGallery);
   imageFields[fingerprintFieldSlug()] = computeImageSourceFingerprint(sourceUrls);
@@ -171,7 +180,12 @@ async function publishCmsItems(itemIds) {
 }
 
 async function migrateOneMachine(machine, cmsItem, options = {}) {
-  const { dryRun = false, skipImagekit = false, forceUpload = false } = options;
+  const {
+    dryRun = false,
+    skipImagekit = false,
+    forceUpload = false,
+    forceRewrite = false,
+  } = options;
   const uniqueId = String(machine.id);
   const name = `${machine.manufacturer || ""} ${machine.model || ""}`.trim();
   const sourceUrls = getImageUrls(machine);
@@ -184,8 +198,10 @@ async function migrateOneMachine(machine, cmsItem, options = {}) {
     return { status: "skipped", reason: "no-cms-item", uniqueId, name };
   }
 
+  // skipImagekit without forceRewrite: leave fingerprint-matched machines alone.
   if (
     skipImagekit &&
+    !forceRewrite &&
     feedImagesUnchanged(cmsItem.fieldData, sourceUrls) &&
     cmsGalleryLayoutMatches(cmsItem.fieldData, sourceUrls)
   ) {
@@ -199,19 +215,26 @@ async function migrateOneMachine(machine, cmsItem, options = {}) {
   }
 
   if (dryRun) {
+    const previewPaths = buildFilePathsForMachine(uniqueId, sourceUrls);
+    const preview = mapImageKitFields(previewPaths, secondGalleryFieldSlug());
     return {
       status: "dry-run",
       uniqueId,
       name,
       itemId: cmsItem.id,
       imageCount: sourceUrls.length,
+      sampleUrl: preview["image-gallery"]?.[0]?.url,
     };
   }
 
   const imageFields = await resolveImageFieldsForMachine(
     machine,
     cmsItem.fieldData,
-    { forceUpload: forceUpload || !skipImagekit }
+    {
+      forceUpload,
+      // forceRewrite / skipImagekit: patch CMS with current transform URLs, no upload
+      skipUpload: (forceRewrite || skipImagekit) && !forceUpload,
+    }
   );
   await patchCmsImages(cmsItem.id, imageFields);
 
@@ -236,4 +259,7 @@ module.exports = {
   migrateOneMachine,
   buildDeliveryUrl,
   GALLERY_WIDTH,
+  THUMB_WIDTH,
+  QUALITY,
+  FORMAT,
 };

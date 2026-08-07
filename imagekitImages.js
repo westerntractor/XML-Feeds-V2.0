@@ -1,8 +1,10 @@
 /** MachineFinder / remote URLs → ImageKit upload + delivery URLs */
 
-const GALLERY_WIDTH = parseInt(process.env.IMAGEKIT_GALLERY_WIDTH || "1600", 10);
+const GALLERY_WIDTH = parseInt(process.env.IMAGEKIT_GALLERY_WIDTH || "1200", 10);
 const THUMB_WIDTH = parseInt(process.env.IMAGEKIT_THUMB_WIDTH || "800", 10);
-const QUALITY = parseInt(process.env.IMAGEKIT_QUALITY || "90", 10);
+const QUALITY = parseInt(process.env.IMAGEKIT_QUALITY || "60", 10);
+/** ImageKit output format for CMS import URLs (avif | webp | jpg | auto). */
+const FORMAT = String(process.env.IMAGEKIT_FORMAT || "avif").toLowerCase();
 
 /** Webflow multi-image field limit (per field). */
 const WEBFLOW_GALLERY_MAX = parseInt(process.env.WEBFLOW_GALLERY_MAX || "25", 10);
@@ -57,7 +59,8 @@ function buildDeliveryUrl(filePath, { width } = {}) {
   const path = String(filePath || "").replace(/^\//, "");
   if (!endpoint || !path) return "";
   if (width) {
-    return `${endpoint}/tr:w-${width},q-${QUALITY},f-auto/${path}`;
+    const format = FORMAT === "auto" ? "auto" : FORMAT;
+    return `${endpoint}/tr:w-${width},q-${QUALITY},f-${format}/${path}`;
   }
   return `${endpoint}/${path}`;
 }
@@ -203,4 +206,5 @@ module.exports = {
   GALLERY_WIDTH,
   THUMB_WIDTH,
   QUALITY,
+  FORMAT,
 };

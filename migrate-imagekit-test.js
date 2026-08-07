@@ -9,14 +9,17 @@
 
 require("dotenv/config");
 const { getImageUrls } = require("./fieldMap");
-const { isImageKitEnabled, machineFolder } = require("./imagekitImages");
+const {
+  isImageKitEnabled,
+  machineFolder,
+  galleryUrlsFromFieldData,
+} = require("./imagekitImages");
 const {
   fetchFeedMachines,
   getAllCollectionItems,
   pickKeeper,
   migrateOneMachine,
   publishCmsItems,
-  galleryUrls,
 } = require("./imagekitMigrate");
 
 function parseArgs(argv) {
@@ -103,7 +106,7 @@ async function main() {
     throw new Error(`No CMS item found for ${identifier}`);
   }
 
-  const beforeUrls = galleryUrls(cmsItem.fieldData);
+  const beforeUrls = galleryUrlsFromFieldData(cmsItem.fieldData);
   console.log(`\nCMS item: ${cmsItem.id}`);
   console.log("  before (first 2 gallery URLs):");
   beforeUrls.slice(0, 2).forEach((u) => console.log(`    ${u}`));
@@ -114,7 +117,10 @@ async function main() {
     return;
   }
 
-  const result = await migrateOneMachine(machine, cmsItem, { forceUpload });
+  const result = await migrateOneMachine(machine, cmsItem, {
+    forceUpload,
+    forceRewrite: true,
+  });
   console.log("\nDone.");
   console.log("  status:", result.status);
   console.log("  gallery images:", result.imageCount);

@@ -227,13 +227,30 @@
     if (node) node.textContent = text != null ? String(text) : "";
   }
 
+  function setCardImage(el, imageUrl, altText) {
+    if (!el) return;
+    var url = imageUrl || "";
+    if (el.tagName === "IMG") {
+      if (url) {
+        el.src = url;
+      } else {
+        el.removeAttribute("src");
+      }
+      el.removeAttribute("srcset");
+      el.alt = altText || "";
+      // Template may have copied a CSS background from Designer; clear it.
+      if (el.style) el.style.backgroundImage = "none";
+      return;
+    }
+    if (el.style) {
+      el.style.backgroundImage = url ? 'url("' + url + '")' : "none";
+    }
+  }
+
   function renderCard(machine) {
     var card = cardTemplate.cloneNode(true);
-    var img = card.querySelector(".listing-image");
-    if (img) {
-      img.src = machine.image || img.src;
-      img.alt = machine.name || "";
-    }
+    setCardImage(card.querySelector(".listing-image"), machine.image, machine.name);
+    setCardImage(card.querySelector(".listing-image-overlay"), machine.image, "");
     setField(card, ".year-block h3", machine.year || "");
     setField(card, ".make-block h3", machine.make || "");
     setField(card, ".model-block h3", machine.model || "");

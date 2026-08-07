@@ -170,9 +170,10 @@ function logEnvSnapshot(section = "env") {
     COLLECTION_ID: process.env.COLLECTION_ID,
     IMAGEKIT_UPLOAD_FOLDER: process.env.IMAGEKIT_UPLOAD_FOLDER,
     IMAGEKIT_URL_ENDPOINT: process.env.IMAGEKIT_URL_ENDPOINT,
-    IMAGEKIT_QUALITY: process.env.IMAGEKIT_QUALITY || "90",
-    IMAGEKIT_GALLERY_WIDTH: process.env.IMAGEKIT_GALLERY_WIDTH || "1600",
+    IMAGEKIT_QUALITY: process.env.IMAGEKIT_QUALITY || "60",
+    IMAGEKIT_GALLERY_WIDTH: process.env.IMAGEKIT_GALLERY_WIDTH || "1200",
     IMAGEKIT_THUMB_WIDTH: process.env.IMAGEKIT_THUMB_WIDTH || "800",
+    IMAGEKIT_FORMAT: process.env.IMAGEKIT_FORMAT || "avif",
     IMAGEKIT_MAX_IMAGES:
       process.env.IMAGEKIT_MAX_IMAGES_PER_MACHINE ||
       process.env.CLOUDINARY_MAX_IMAGES_PER_MACHINE ||
@@ -246,7 +247,7 @@ function logBuildMachineFieldsResult(uniqueId, {
     sampleRebuiltPath,
     sampleRebuiltDeliveryUrl: sampleRebuiltPath
       ? buildDeliveryUrl(sampleRebuiltPath, {
-          width: parseInt(process.env.IMAGEKIT_GALLERY_WIDTH || "1600", 10),
+          width: parseInt(process.env.IMAGEKIT_GALLERY_WIDTH || "1200", 10),
         })
       : null,
   });
